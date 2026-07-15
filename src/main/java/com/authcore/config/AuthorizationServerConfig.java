@@ -7,8 +7,6 @@ import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.annotation.Order;
-import org.springframework.http.MediaType;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.core.userdetails.User;
@@ -26,8 +24,6 @@ import org.springframework.security.oauth2.server.authorization.settings.Authori
 import org.springframework.security.oauth2.server.authorization.settings.ClientSettings;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.web.authentication.LoginUrlAuthenticationEntryPoint;
-import org.springframework.security.web.util.matcher.MediaTypeRequestMatcher;
 
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
@@ -42,37 +38,20 @@ import static org.springframework.security.config.Customizer.withDefaults;
 @EnableWebSecurity
 public class AuthorizationServerConfig {
 
-    // Chain 1: handles all SAS protocol endpoints (/oauth2/token, /oauth2/authorize,
-    // /.well-known/openid-configuration, /oauth2/jwks, /oauth2/revoke, etc.)
+    // Single chain: SAS protocol endpoints + form login in one place so the
+    // ExceptionTranslationFilter that saves /oauth2/authorize?... to the session
+    // and the SavedRequestAwareAuthenticationSuccessHandler that restores it after
+    // login both live in the same chain — no cross-chain request-cache coordination.
     @Bean
-    @Order(1)
-    public SecurityFilterChain authorizationServerSecurityFilterChain(HttpSecurity http) throws Exception {
-        OAuth2AuthorizationServerConfigurer authorizationServerConfigurer =
-                new OAuth2AuthorizationServerConfigurer();
-
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
-            .securityMatcher(authorizationServerConfigurer.getEndpointsMatcher())
-            .with(authorizationServerConfigurer, configurer ->
+            .with(new OAuth2AuthorizationServerConfigurer(), configurer ->
                 configurer.oidc(withDefaults()))
-            .authorizeHttpRequests(authorize -> authorize.anyRequest().authenticated())
-            .exceptionHandling(exceptions -> exceptions
-                .defaultAuthenticationEntryPointFor(
-                    new LoginUrlAuthenticationEntryPoint("/login"),
-                    new MediaTypeRequestMatcher(MediaType.TEXT_HTML)))
-            .oauth2ResourceServer(resourceServer -> resourceServer.jwt(withDefaults()));
-
-        return http.build();
-    }
-
-    // Chain 2: handles everything else — your app endpoints, form login page, actuator
-    @Bean
-    @Order(2)
-    public SecurityFilterChain defaultSecurityFilterChain(HttpSecurity http) throws Exception {
-        http
             .authorizeHttpRequests(authorize -> authorize
                 .requestMatchers("/actuator/**").permitAll()
                 .anyRequest().authenticated())
             .formLogin(withDefaults());
+
         return http.build();
     }
 
