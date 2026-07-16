@@ -7,22 +7,21 @@ import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.jdbc.core.JdbcOperations;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
-import org.springframework.security.core.userdetails.User;
-import org.springframework.security.core.userdetails.UserDetailsService;
-import org.springframework.security.oauth2.core.AuthorizationGrantType;
-import org.springframework.security.oauth2.core.ClientAuthenticationMethod;
-import org.springframework.security.oauth2.core.oidc.OidcScopes;
-import org.springframework.security.oauth2.jwt.JwtDecoder;
-import org.springframework.security.oauth2.server.authorization.client.InMemoryRegisteredClientRepository;
-import org.springframework.security.oauth2.server.authorization.client.RegisteredClient;
-import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
 import org.springframework.security.config.annotation.web.configuration.OAuth2AuthorizationServerConfiguration;
 import org.springframework.security.config.annotation.web.configurers.oauth2.server.authorization.OAuth2AuthorizationServerConfigurer;
+import org.springframework.security.crypto.factory.PasswordEncoderFactories;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.server.authorization.JdbcOAuth2AuthorizationConsentService;
+import org.springframework.security.oauth2.server.authorization.JdbcOAuth2AuthorizationService;
+import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationConsentService;
+import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationService;
+import org.springframework.security.oauth2.server.authorization.client.JdbcRegisteredClientRepository;
+import org.springframework.security.oauth2.server.authorization.client.RegisteredClientRepository;
 import org.springframework.security.oauth2.server.authorization.settings.AuthorizationServerSettings;
-import org.springframework.security.oauth2.server.authorization.settings.ClientSettings;
-import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
 
 import java.security.KeyPair;
@@ -38,10 +37,6 @@ import static org.springframework.security.config.Customizer.withDefaults;
 @EnableWebSecurity
 public class AuthorizationServerConfig {
 
-    // Single chain: SAS protocol endpoints + form login in one place so the
-    // ExceptionTranslationFilter that saves /oauth2/authorize?... to the session
-    // and the SavedRequestAwareAuthenticationSuccessHandler that restores it after
-    // login both live in the same chain — no cross-chain request-cache coordination.
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
         http
@@ -55,39 +50,33 @@ public class AuthorizationServerConfig {
         return http.build();
     }
 
-    // M1: one hardcoded user. Replaced in M2 with AuthCoreUserDetailsService + DB.
     @Bean
-    @SuppressWarnings("deprecation")
-    public UserDetailsService userDetailsService() {
-        return new InMemoryUserDetailsManager(
-            User.withDefaultPasswordEncoder()
-                .username("ezzat")
-                .password("password")
-                .roles("USER")
-                .build()
-        );
+    public PasswordEncoder passwordEncoder() {
+        return PasswordEncoderFactories.createDelegatingPasswordEncoder();
     }
 
-    // M1: one in-memory client. Replaced in M2 with JpaRegisteredClientRepository.
+    // M2: clients stored in oauth2_registered_client table.
     @Bean
-    public RegisteredClientRepository registeredClientRepository() {
-        RegisteredClient client = RegisteredClient.withId(UUID.randomUUID().toString())
-            .clientId("authcore-client")
-            .clientSecret("{noop}secret")
-            .clientAuthenticationMethod(ClientAuthenticationMethod.CLIENT_SECRET_BASIC)
-            .authorizationGrantType(AuthorizationGrantType.AUTHORIZATION_CODE)
-            .authorizationGrantType(AuthorizationGrantType.REFRESH_TOKEN)
-            .redirectUri("http://127.0.0.1:8080/authorized")
-            .scope(OidcScopes.OPENID)
-            .scope(OidcScopes.PROFILE)
-            .scope("payments:read")
-            .scope("payments:write")
-            .clientSettings(ClientSettings.builder().requireAuthorizationConsent(true).build())
-            .build();
-        return new InMemoryRegisteredClientRepository(client);
+    public RegisteredClientRepository registeredClientRepository(JdbcOperations jdbc) {
+        return new JdbcRegisteredClientRepository(jdbc);
     }
 
-    // RSA key pair generated fresh on every startup (M1 only).
+    // M2: auth codes, access tokens, refresh tokens survive server restarts.
+    @Bean
+    public OAuth2AuthorizationService authorizationService(
+            JdbcOperations jdbc,
+            RegisteredClientRepository registeredClientRepository) {
+        return new JdbcOAuth2AuthorizationService(jdbc, registeredClientRepository);
+    }
+
+    // M2: consent decisions survive server restarts — no re-consent on every login.
+    @Bean
+    public OAuth2AuthorizationConsentService authorizationConsentService(
+            JdbcOperations jdbc,
+            RegisteredClientRepository registeredClientRepository) {
+        return new JdbcOAuth2AuthorizationConsentService(jdbc, registeredClientRepository);
+    }
+
     // M7 replaces this with JpaJwkSource + key rotation from DB.
     @Bean
     public JWKSource<SecurityContext> jwkSource() {
