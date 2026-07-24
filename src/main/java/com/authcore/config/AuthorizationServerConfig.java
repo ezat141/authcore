@@ -5,8 +5,11 @@ import com.nimbusds.jose.jwk.RSAKey;
 import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
+import com.authcore.token.PublicRefreshTokenAuthenticationConverter;
+import com.authcore.token.PublicRefreshTokenAuthenticationProvider;
 import com.authcore.token.RefreshTokenFamilyStore;
 import com.authcore.token.ReuseDetectingOAuth2AuthorizationService;
+import com.authcore.token.RotatingRefreshTokenGenerator;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcOperations;
@@ -16,7 +19,13 @@ import org.springframework.security.config.annotation.web.configuration.OAuth2Au
 import org.springframework.security.config.annotation.web.configurers.oauth2.server.authorization.OAuth2AuthorizationServerConfigurer;
 import org.springframework.security.crypto.factory.PasswordEncoderFactories;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.oauth2.core.OAuth2Token;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
+import org.springframework.security.oauth2.server.authorization.token.DelegatingOAuth2TokenGenerator;
+import org.springframework.security.oauth2.server.authorization.token.JwtGenerator;
+import org.springframework.security.oauth2.server.authorization.token.OAuth2AccessTokenGenerator;
+import org.springframework.security.oauth2.server.authorization.token.OAuth2TokenGenerator;
 import org.springframework.security.oauth2.server.authorization.JdbcOAuth2AuthorizationConsentService;
 import org.springframework.security.oauth2.server.authorization.JdbcOAuth2AuthorizationService;
 import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationConsentService;
@@ -40,10 +49,18 @@ import static org.springframework.security.config.Customizer.withDefaults;
 public class AuthorizationServerConfig {
 
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    public SecurityFilterChain securityFilterChain(
+            HttpSecurity http,
+            RegisteredClientRepository registeredClientRepository) throws Exception {
         http
-            .with(new OAuth2AuthorizationServerConfigurer(), configurer ->
-                configurer.oidc(withDefaults()))
+            .with(new OAuth2AuthorizationServerConfigurer(), configurer -> configurer
+                .oidc(withDefaults())
+                // Teach the token endpoint how to authenticate a public client on the
+                // refresh grant — needed because we issue public clients refresh tokens.
+                .clientAuthentication(clientAuth -> clientAuth
+                    .authenticationConverter(new PublicRefreshTokenAuthenticationConverter())
+                    .authenticationProvider(new PublicRefreshTokenAuthenticationProvider(
+                            registeredClientRepository))))
             .authorizeHttpRequests(authorize -> authorize
                 .requestMatchers("/actuator/**").permitAll()
                 .anyRequest().authenticated())
@@ -112,6 +129,18 @@ public class AuthorizationServerConfig {
     @Bean
     public JwtDecoder jwtDecoder(JWKSource<SecurityContext> jwkSource) {
         return OAuth2AuthorizationServerConfiguration.jwtDecoder(jwkSource);
+    }
+
+    /**
+     * Mirrors the generator SAS builds by default, but swaps in
+     * {@link RotatingRefreshTokenGenerator} so public clients get refresh tokens too.
+     */
+    @Bean
+    public OAuth2TokenGenerator<? extends OAuth2Token> tokenGenerator(JWKSource<SecurityContext> jwkSource) {
+        return new DelegatingOAuth2TokenGenerator(
+                new JwtGenerator(new NimbusJwtEncoder(jwkSource)),
+                new OAuth2AccessTokenGenerator(),
+                new RotatingRefreshTokenGenerator());
     }
 
     @Bean
