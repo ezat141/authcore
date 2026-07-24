@@ -5,6 +5,8 @@ import com.nimbusds.jose.jwk.RSAKey;
 import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
+import com.authcore.token.RefreshTokenFamilyStore;
+import com.authcore.token.ReuseDetectingOAuth2AuthorizationService;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcOperations;
@@ -61,12 +63,21 @@ public class AuthorizationServerConfig {
         return new JdbcRegisteredClientRepository(jdbc);
     }
 
+    @Bean
+    public RefreshTokenFamilyStore refreshTokenFamilyStore(JdbcOperations jdbc) {
+        return new RefreshTokenFamilyStore(jdbc);
+    }
+
     // M2: auth codes, access tokens, refresh tokens survive server restarts.
+    // M3: wrapped so a replayed refresh token revokes its whole rotation family.
     @Bean
     public OAuth2AuthorizationService authorizationService(
             JdbcOperations jdbc,
-            RegisteredClientRepository registeredClientRepository) {
-        return new JdbcOAuth2AuthorizationService(jdbc, registeredClientRepository);
+            RegisteredClientRepository registeredClientRepository,
+            RefreshTokenFamilyStore refreshTokenFamilyStore) {
+        return new ReuseDetectingOAuth2AuthorizationService(
+                new JdbcOAuth2AuthorizationService(jdbc, registeredClientRepository),
+                refreshTokenFamilyStore);
     }
 
     // M2: consent decisions survive server restarts — no re-consent on every login.
