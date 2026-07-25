@@ -5,12 +5,21 @@ import com.nimbusds.jose.jwk.RSAKey;
 import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
+import com.authcore.apikey.ApiKeyAuthenticationFilter;
+import com.authcore.apikey.ApiKeyAuthenticationProvider;
+import com.authcore.apikey.ApiKeyStore;
 import com.authcore.token.PublicRefreshTokenAuthenticationConverter;
 import com.authcore.token.PublicRefreshTokenAuthenticationProvider;
 import com.authcore.token.RefreshTokenFamilyStore;
 import com.authcore.token.ReuseDetectingOAuth2AuthorizationService;
 import com.authcore.token.RotatingRefreshTokenGenerator;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.annotation.Order;
+import org.springframework.http.HttpMethod;
+import org.springframework.security.authentication.ProviderManager;
+import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.oauth2.server.resource.web.authentication.BearerTokenAuthenticationFilter;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcOperations;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -48,7 +57,46 @@ import static org.springframework.security.config.Customizer.withDefaults;
 @EnableWebSecurity
 public class AuthorizationServerConfig {
 
+    /**
+     * Resource API chain. Scoped to {@code /api/**} only, so it never sees the
+     * authorization-code login redirect — the cross-chain request-cache problem that
+     * forced a single chain in M1 cannot arise here.
+     *
+     * <p>Accepts a bearer JWT or an {@code X-API-Key}; the scope rules below are written
+     * against {@code SCOPE_*} authorities, which both mechanisms produce.
+     */
     @Bean
+    @Order(1)
+    public SecurityFilterChain resourceApiSecurityFilterChain(
+            HttpSecurity http, ApiKeyStore apiKeyStore) throws Exception {
+        ApiKeyAuthenticationFilter apiKeyFilter = new ApiKeyAuthenticationFilter(
+                new ProviderManager(new ApiKeyAuthenticationProvider(apiKeyStore)));
+
+        http
+            .securityMatcher("/api/**")
+            .authorizeHttpRequests(authorize -> authorize
+                .requestMatchers(HttpMethod.GET, "/api/machine/**")
+                    .hasAuthority("SCOPE_payments:read")
+                .requestMatchers(HttpMethod.POST, "/api/machine/**")
+                    .hasAuthority("SCOPE_payments:write")
+                .anyRequest().authenticated())
+            .oauth2ResourceServer(resourceServer -> resourceServer.jwt(withDefaults()))
+            .addFilterBefore(apiKeyFilter, BearerTokenAuthenticationFilter.class)
+            // Machine callers present a credential on every request; a session would
+            // only add server state and CSRF exposure for nothing.
+            .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .csrf(AbstractHttpConfigurer::disable);
+
+        return http.build();
+    }
+
+    @Bean
+    public ApiKeyStore apiKeyStore(JdbcOperations jdbc) {
+        return new ApiKeyStore(jdbc);
+    }
+
+    @Bean
+    @Order(2)
     public SecurityFilterChain securityFilterChain(
             HttpSecurity http,
             RegisteredClientRepository registeredClientRepository) throws Exception {
