@@ -24,7 +24,9 @@ public class AuthCoreUserDetailsService implements UserDetailsService {
                 .map(user -> User.builder()
                         .username(user.getUsername())
                         .password(user.getPasswordHash())
-                        .authorities(user.getAuthorities().stream()
+                        // Roles and their permissions both become authorities, so
+                        // hasRole('USER') and hasAuthority('payments:write') both work.
+                        .authorities(user.toAuthorityNames().stream()
                                 .map(SimpleGrantedAuthority::new)
                                 .collect(Collectors.toSet()))
                         .disabled(!user.isEnabled())

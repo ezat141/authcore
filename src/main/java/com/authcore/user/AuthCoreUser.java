@@ -26,10 +26,11 @@ public class AuthCoreUser {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
 
-    @ElementCollection(fetch = FetchType.EAGER)
-    @CollectionTable(name = "user_authorities", joinColumns = @JoinColumn(name = "user_id"))
-    @Column(name = "authority")
-    private Set<String> authorities = new HashSet<>();
+    @ManyToMany(fetch = FetchType.EAGER)
+    @JoinTable(name = "user_roles",
+            joinColumns = @JoinColumn(name = "user_id"),
+            inverseJoinColumns = @JoinColumn(name = "role_id"))
+    private Set<Role> roles = new HashSet<>();
 
     public UUID getId() { return id; }
 
@@ -44,5 +45,31 @@ public class AuthCoreUser {
 
     public Instant getCreatedAt() { return createdAt; }
 
-    public Set<String> getAuthorities() { return authorities; }
+    public Set<Role> getRoles() { return roles; }
+
+    /**
+     * Flattens roles and their permissions into the authority strings Spring checks:
+     * {@code ROLE_USER}, {@code payments:read}, …
+     */
+    public Set<String> toAuthorityNames() {
+        Set<String> authorities = new HashSet<>();
+        for (Role role : roles) {
+            authorities.add(role.getName());
+            role.getPermissions().forEach(permission -> authorities.add(permission.getName()));
+        }
+        return authorities;
+    }
+
+    public Set<String> roleNames() {
+        return roles.stream()
+                .map(Role::getName)
+                .map(name -> name.startsWith("ROLE_") ? name.substring("ROLE_".length()) : name)
+                .collect(java.util.stream.Collectors.toCollection(java.util.LinkedHashSet::new));
+    }
+
+    public Set<String> permissionNames() {
+        Set<String> permissions = new HashSet<>();
+        roles.forEach(role -> role.getPermissions().forEach(p -> permissions.add(p.getName())));
+        return permissions;
+    }
 }

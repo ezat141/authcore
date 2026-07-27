@@ -8,6 +8,10 @@ import com.nimbusds.jose.proc.SecurityContext;
 import com.authcore.apikey.ApiKeyAuthenticationFilter;
 import com.authcore.apikey.ApiKeyAuthenticationProvider;
 import com.authcore.apikey.ApiKeyStore;
+import com.authcore.security.AuthCoreJwtAuthoritiesConverter;
+import com.authcore.token.AuthCoreTokenCustomizer;
+import com.authcore.user.UserRepository;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import com.authcore.token.PublicRefreshTokenAuthenticationConverter;
 import com.authcore.token.PublicRefreshTokenAuthenticationProvider;
 import com.authcore.token.RefreshTokenFamilyStore;
@@ -80,7 +84,8 @@ public class AuthorizationServerConfig {
                 .requestMatchers(HttpMethod.POST, "/api/machine/**")
                     .hasAuthority("SCOPE_payments:write")
                 .anyRequest().authenticated())
-            .oauth2ResourceServer(resourceServer -> resourceServer.jwt(withDefaults()))
+            .oauth2ResourceServer(resourceServer -> resourceServer
+                .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter())))
             .addFilterBefore(apiKeyFilter, BearerTokenAuthenticationFilter.class)
             // Machine callers present a credential on every request; a session would
             // only add server state and CSRF exposure for nothing.
@@ -93,6 +98,13 @@ public class AuthorizationServerConfig {
     @Bean
     public ApiKeyStore apiKeyStore(JdbcOperations jdbc) {
         return new ApiKeyStore(jdbc);
+    }
+
+    /** Reads roles and permissions out of the JWT, not just scope. */
+    private static JwtAuthenticationConverter jwtAuthenticationConverter() {
+        JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
+        converter.setJwtGrantedAuthoritiesConverter(new AuthCoreJwtAuthoritiesConverter());
+        return converter;
     }
 
     @Bean
@@ -184,9 +196,16 @@ public class AuthorizationServerConfig {
      * {@link RotatingRefreshTokenGenerator} so public clients get refresh tokens too.
      */
     @Bean
-    public OAuth2TokenGenerator<? extends OAuth2Token> tokenGenerator(JWKSource<SecurityContext> jwkSource) {
+    public OAuth2TokenGenerator<? extends OAuth2Token> tokenGenerator(
+            JWKSource<SecurityContext> jwkSource, UserRepository userRepository) {
+        JwtGenerator jwtGenerator = new JwtGenerator(new NimbusJwtEncoder(jwkSource));
+        // SAS only auto-applies an OAuth2TokenCustomizer bean to the generator it builds
+        // itself. We supply our own generator, so the customizer must be set here or the
+        // roles/permissions claims silently never appear.
+        jwtGenerator.setJwtCustomizer(new AuthCoreTokenCustomizer(userRepository));
+
         return new DelegatingOAuth2TokenGenerator(
-                new JwtGenerator(new NimbusJwtEncoder(jwkSource)),
+                jwtGenerator,
                 new OAuth2AccessTokenGenerator(),
                 new RotatingRefreshTokenGenerator());
     }
