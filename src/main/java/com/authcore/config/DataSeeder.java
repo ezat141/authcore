@@ -2,7 +2,12 @@ package com.authcore.config;
 
 import com.authcore.apikey.ApiKeyStore;
 import com.authcore.user.AuthCoreUser;
+import com.authcore.user.Permission;
+import com.authcore.user.PermissionRepository;
+import com.authcore.user.Role;
+import com.authcore.user.RoleRepository;
 import com.authcore.user.UserRepository;
+import org.springframework.transaction.annotation.Transactional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.ApplicationArguments;
@@ -31,27 +36,87 @@ public class DataSeeder implements ApplicationRunner {
     static final String DEMO_API_KEY = "ak_demo_reporting_job_local_only_0000000000";
 
     private final UserRepository userRepository;
+    private final RoleRepository roleRepository;
+    private final PermissionRepository permissionRepository;
     private final PasswordEncoder passwordEncoder;
     private final RegisteredClientRepository registeredClientRepository;
     private final ApiKeyStore apiKeyStore;
 
     public DataSeeder(UserRepository userRepository,
+                      RoleRepository roleRepository,
+                      PermissionRepository permissionRepository,
                       PasswordEncoder passwordEncoder,
                       RegisteredClientRepository registeredClientRepository,
                       ApiKeyStore apiKeyStore) {
         this.userRepository = userRepository;
+        this.roleRepository = roleRepository;
+        this.permissionRepository = permissionRepository;
         this.passwordEncoder = passwordEncoder;
         this.registeredClientRepository = registeredClientRepository;
         this.apiKeyStore = apiKeyStore;
     }
 
     @Override
+    @Transactional
     public void run(ApplicationArguments args) {
-        seedUser();
+        Role userRole = seedRoles();
+        seedUser("ezzat", "password", userRole);
+        seedUser("admin", "admin-password", requireRole("ROLE_ADMIN"));
         upsert(confidentialClient());
         upsert(publicSpaClient());
         upsert(machineClient());
         seedApiKey();
+    }
+
+    /**
+     * ROLE_USER can act on its own records; ROLE_ADMIN adds the {@code :all} variants
+     * that let it reach records it does not own.
+     */
+    private Role seedRoles() {
+        Permission paymentsRead   = permission("payments:read",     "Read payment records");
+        Permission paymentsWrite  = permission("payments:write",    "Create and modify payments");
+        Permission accountsRead   = permission("accounts:read",     "Read own account");
+        Permission accountsReadAll = permission("accounts:read:all", "Read any account, regardless of owner");
+
+        Role user = role("ROLE_USER", "Standard end user");
+        addPermissions(user, paymentsRead, accountsRead);
+
+        Role admin = role("ROLE_ADMIN", "Administrator");
+        addPermissions(admin, paymentsRead, paymentsWrite, accountsRead, accountsReadAll);
+
+        return user;
+    }
+
+    private Permission permission(String name, String description) {
+        return permissionRepository.findByName(name)
+                .orElseGet(() -> permissionRepository.save(new Permission(name, description)));
+    }
+
+    private Role role(String name, String description) {
+        return roleRepository.findByName(name)
+                .orElseGet(() -> roleRepository.save(new Role(name, description)));
+    }
+
+    private Role requireRole(String name) {
+        return roleRepository.findByName(name)
+                .orElseThrow(() -> new IllegalStateException("Role not seeded: " + name));
+    }
+
+    private void addPermissions(Role role, Permission... permissions) {
+        boolean changed = role.getPermissions().addAll(Set.of(permissions));
+        if (changed) {
+            roleRepository.save(role);
+        }
+    }
+
+    private void seedUser(String username, String rawPassword, Role role) {
+        if (userRepository.findByUsername(username).isPresent()) return;
+
+        AuthCoreUser user = new AuthCoreUser();
+        user.setUsername(username);
+        user.setPasswordHash(passwordEncoder.encode(rawPassword));
+        user.getRoles().add(role);
+        userRepository.save(user);
     }
 
     /**
@@ -88,16 +153,6 @@ public class DataSeeder implements ApplicationRunner {
 
         log.warn("Seeded demo API key '{}' with scope payments:read. Local development only.",
                 DEMO_API_KEY_NAME);
-    }
-
-    private void seedUser() {
-        if (userRepository.findByUsername("ezzat").isPresent()) return;
-
-        AuthCoreUser user = new AuthCoreUser();
-        user.setUsername("ezzat");
-        user.setPasswordHash(passwordEncoder.encode("password"));
-        user.getAuthorities().add("ROLE_USER");
-        userRepository.save(user);
     }
 
     /** Server-side client: authenticates with a secret, so PKCE stays optional. */
