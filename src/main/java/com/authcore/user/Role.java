@@ -1,5 +1,6 @@
 package com.authcore.user;
 
+import com.authcore.tenant.Tenant;
 import jakarta.persistence.*;
 
 import java.util.HashSet;
@@ -18,8 +19,13 @@ public class Role {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
-    @Column(nullable = false, unique = true, length = 50)
+    // Unique per tenant: Acme's ROLE_ADMIN is not Globex's ROLE_ADMIN.
+    @Column(nullable = false, length = 50)
     private String name;
+
+    @ManyToOne(fetch = FetchType.EAGER, optional = false)
+    @JoinColumn(name = "tenant_id", nullable = false)
+    private Tenant tenant;
 
     @Column(length = 255)
     private String description;
@@ -35,10 +41,14 @@ public class Role {
     protected Role() {
     }
 
-    public Role(String name, String description) {
+    public Role(String name, String description, Tenant tenant) {
         this.name = name;
         this.description = description;
+        this.tenant = tenant;
     }
+
+    public Tenant getTenant() { return tenant; }
+    public void setTenant(Tenant tenant) { this.tenant = tenant; }
 
     public UUID getId() { return id; }
 
