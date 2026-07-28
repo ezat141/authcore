@@ -3,6 +3,10 @@ package com.authcore.token;
 import org.springframework.jdbc.core.JdbcOperations;
 import org.springframework.jdbc.core.RowMapper;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
 
@@ -63,5 +67,20 @@ public class RefreshTokenFamilyStore {
 
     public void deleteFamily(String familyId) {
         jdbc.update("DELETE FROM refresh_token_family WHERE family_id = ?", familyId);
+    }
+
+    /**
+     * How a refresh token maps to its row. Lives here because the store owns the key
+     * format — two callers hashing tokens slightly differently would simply never find
+     * each other's rows, and nothing would report an error.
+     */
+    public static String hash(String tokenValue) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(tokenValue.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException ex) {
+            throw new IllegalStateException("SHA-256 is required but unavailable", ex);
+        }
     }
 }

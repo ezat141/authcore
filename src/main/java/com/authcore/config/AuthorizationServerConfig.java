@@ -8,6 +8,11 @@ import com.authcore.apikey.ApiKeyStore;
 import com.authcore.keys.JpaJwkSource;
 import com.authcore.keys.KeyCipher;
 import com.authcore.keys.SigningKeyService;
+import com.authcore.revocation.RevocationService;
+import com.authcore.revocation.RevocationSuccessHandler;
+import com.authcore.revocation.RevokedTokenValidator;
+import org.springframework.security.oauth2.jwt.JwtValidators;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.beans.factory.annotation.Value;
 import com.authcore.security.AuthCoreJwtAuthoritiesConverter;
 import com.authcore.tenant.TenantAuthorizationManager;
@@ -129,7 +134,9 @@ public class AuthorizationServerConfig {
     public SecurityFilterChain securityFilterChain(
             HttpSecurity http,
             RegisteredClientRepository registeredClientRepository,
-            TenantService tenantService) throws Exception {
+            TenantService tenantService,
+            RevocationService revocationService,
+            RefreshTokenFamilyStore refreshTokenFamilyStore) throws Exception {
         http
             // Runs before authentication so /oauth2/authorize and the /login POST both
             // resolve the same tenant — the login form itself carries no tenant hint.
@@ -137,6 +144,11 @@ public class AuthorizationServerConfig {
                     UsernamePasswordAuthenticationFilter.class)
             .with(new OAuth2AuthorizationServerConfigurer(), configurer -> configurer
                 .oidc(withDefaults())
+                // Stock revocation only marks the stored authorization invalid, which
+                // does nothing for a JWT verified by signature alone.
+                .tokenRevocationEndpoint(revocation -> revocation.revocationResponseHandler(
+                        new RevocationSuccessHandler(revocationService, refreshTokenFamilyStore,
+                                (request, response, authentication) -> response.setStatus(200))))
                 // Teach the token endpoint how to authenticate a public client on the
                 // refresh grant — needed because we issue public clients refresh tokens.
                 .clientAuthentication(clientAuth -> clientAuth
@@ -231,9 +243,20 @@ public class AuthorizationServerConfig {
         return new JpaJwkSource(signingKeyService);
     }
 
+    /**
+     * Adds the revocation check to the standard validators rather than replacing them.
+     *
+     * <p>Signature and expiry checks still have to run; being revoked is one more reason
+     * to refuse a token, not a substitute for the usual ones.
+     */
     @Bean
-    public JwtDecoder jwtDecoder(JWKSource<SecurityContext> jwkSource) {
-        return OAuth2AuthorizationServerConfiguration.jwtDecoder(jwkSource);
+    public JwtDecoder jwtDecoder(JWKSource<SecurityContext> jwkSource,
+                                 RevocationService revocationService) {
+        NimbusJwtDecoder decoder =
+                (NimbusJwtDecoder) OAuth2AuthorizationServerConfiguration.jwtDecoder(jwkSource);
+        decoder.setJwtValidator(JwtValidators.createDefaultWithValidators(
+                new RevokedTokenValidator(revocationService)));
+        return decoder;
     }
 
     /**
