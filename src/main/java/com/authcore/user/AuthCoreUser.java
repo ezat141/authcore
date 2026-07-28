@@ -1,5 +1,6 @@
 package com.authcore.user;
 
+import com.authcore.tenant.Tenant;
 import jakarta.persistence.*;
 import java.time.Instant;
 import java.util.HashSet;
@@ -14,8 +15,13 @@ public class AuthCoreUser {
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
 
-    @Column(nullable = false, unique = true, length = 50)
+    // Unique per tenant, not globally: alice@acme and alice@globex may coexist.
+    @Column(nullable = false, length = 50)
     private String username;
+
+    @ManyToOne(fetch = FetchType.EAGER, optional = false)
+    @JoinColumn(name = "tenant_id", nullable = false)
+    private Tenant tenant;
 
     @Column(name = "password_hash", nullable = false, length = 255)
     private String passwordHash;
@@ -36,6 +42,11 @@ public class AuthCoreUser {
 
     public String getUsername() { return username; }
     public void setUsername(String username) { this.username = username; }
+
+    public Tenant getTenant() { return tenant; }
+    public void setTenant(Tenant tenant) { this.tenant = tenant; }
+
+    public String getTenantSlug() { return tenant != null ? tenant.getSlug() : null; }
 
     public String getPasswordHash() { return passwordHash; }
     public void setPasswordHash(String passwordHash) { this.passwordHash = passwordHash; }

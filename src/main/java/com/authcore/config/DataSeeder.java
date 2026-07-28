@@ -1,6 +1,8 @@
 package com.authcore.config;
 
 import com.authcore.apikey.ApiKeyStore;
+import com.authcore.tenant.Tenant;
+import com.authcore.tenant.TenantRepository;
 import com.authcore.user.AuthCoreUser;
 import com.authcore.user.Permission;
 import com.authcore.user.PermissionRepository;
@@ -38,6 +40,7 @@ public class DataSeeder implements ApplicationRunner {
     private final UserRepository userRepository;
     private final RoleRepository roleRepository;
     private final PermissionRepository permissionRepository;
+    private final TenantRepository tenantRepository;
     private final PasswordEncoder passwordEncoder;
     private final RegisteredClientRepository registeredClientRepository;
     private final ApiKeyStore apiKeyStore;
@@ -45,12 +48,14 @@ public class DataSeeder implements ApplicationRunner {
     public DataSeeder(UserRepository userRepository,
                       RoleRepository roleRepository,
                       PermissionRepository permissionRepository,
+                      TenantRepository tenantRepository,
                       PasswordEncoder passwordEncoder,
                       RegisteredClientRepository registeredClientRepository,
                       ApiKeyStore apiKeyStore) {
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
         this.permissionRepository = permissionRepository;
+        this.tenantRepository = tenantRepository;
         this.passwordEncoder = passwordEncoder;
         this.registeredClientRepository = registeredClientRepository;
         this.apiKeyStore = apiKeyStore;
@@ -59,32 +64,47 @@ public class DataSeeder implements ApplicationRunner {
     @Override
     @Transactional
     public void run(ApplicationArguments args) {
-        Role userRole = seedRoles();
-        seedUser("ezzat", "password", userRole);
-        seedUser("admin", "admin-password", requireRole("ROLE_ADMIN"));
+        Tenant defaultTenant = requireTenant("default");
+        Tenant acme = requireTenant("acme");
+
+        seedTenantRoles(defaultTenant);
+        seedTenantRoles(acme);
+
+        seedUser(defaultTenant, "ezzat", "password", "ROLE_USER");
+        seedUser(defaultTenant, "admin", "admin-password", "ROLE_ADMIN");
+
+        // Same usernames, different tenant — the composite key makes these distinct
+        // people, and each can only authenticate against their own tenant.
+        seedUser(acme, "ezzat", "acme-password", "ROLE_USER");
+        seedUser(acme, "alice", "alice-password", "ROLE_ADMIN");
+
         upsert(confidentialClient());
         upsert(publicSpaClient());
         upsert(machineClient());
         seedApiKey();
     }
 
-    /**
-     * ROLE_USER can act on its own records; ROLE_ADMIN adds the {@code :all} variants
-     * that let it reach records it does not own.
-     */
-    private Role seedRoles() {
-        Permission paymentsRead   = permission("payments:read",     "Read payment records");
-        Permission paymentsWrite  = permission("payments:write",    "Create and modify payments");
-        Permission accountsRead   = permission("accounts:read",     "Read own account");
-        Permission accountsReadAll = permission("accounts:read:all", "Read any account, regardless of owner");
+    private Tenant requireTenant(String slug) {
+        return tenantRepository.findBySlug(slug)
+                .orElseThrow(() -> new IllegalStateException("Tenant not created by migration: " + slug));
+    }
 
-        Role user = role("ROLE_USER", "Standard end user");
+    /**
+     * Every tenant gets its own role objects. Permissions are shared — they are a
+     * vocabulary of capabilities, not policy — but which roles exist and what they grant
+     * is each tenant's own business.
+     */
+    private void seedTenantRoles(Tenant tenant) {
+        Permission paymentsRead    = permission("payments:read",      "Read payment records");
+        Permission paymentsWrite   = permission("payments:write",     "Create and modify payments");
+        Permission accountsRead    = permission("accounts:read",      "Read own account");
+        Permission accountsReadAll = permission("accounts:read:all",  "Read any account, regardless of owner");
+
+        Role user = role(tenant, "ROLE_USER", "Standard end user");
         addPermissions(user, paymentsRead, accountsRead);
 
-        Role admin = role("ROLE_ADMIN", "Administrator");
+        Role admin = role(tenant, "ROLE_ADMIN", "Administrator");
         addPermissions(admin, paymentsRead, paymentsWrite, accountsRead, accountsReadAll);
-
-        return user;
     }
 
     private Permission permission(String name, String description) {
@@ -92,14 +112,9 @@ public class DataSeeder implements ApplicationRunner {
                 .orElseGet(() -> permissionRepository.save(new Permission(name, description)));
     }
 
-    private Role role(String name, String description) {
-        return roleRepository.findByName(name)
-                .orElseGet(() -> roleRepository.save(new Role(name, description)));
-    }
-
-    private Role requireRole(String name) {
-        return roleRepository.findByName(name)
-                .orElseThrow(() -> new IllegalStateException("Role not seeded: " + name));
+    private Role role(Tenant tenant, String name, String description) {
+        return roleRepository.findByTenantSlugAndName(tenant.getSlug(), name)
+                .orElseGet(() -> roleRepository.save(new Role(name, description, tenant)));
     }
 
     private void addPermissions(Role role, Permission... permissions) {
@@ -109,10 +124,15 @@ public class DataSeeder implements ApplicationRunner {
         }
     }
 
-    private void seedUser(String username, String rawPassword, Role role) {
-        if (userRepository.findByUsername(username).isPresent()) return;
+    private void seedUser(Tenant tenant, String username, String rawPassword, String roleName) {
+        if (userRepository.findByTenantSlugAndUsername(tenant.getSlug(), username).isPresent()) return;
+
+        Role role = roleRepository.findByTenantSlugAndName(tenant.getSlug(), roleName)
+                .orElseThrow(() -> new IllegalStateException(
+                        "Role " + roleName + " not seeded for tenant " + tenant.getSlug()));
 
         AuthCoreUser user = new AuthCoreUser();
+        user.setTenant(tenant);
         user.setUsername(username);
         user.setPasswordHash(passwordEncoder.encode(rawPassword));
         user.getRoles().add(role);

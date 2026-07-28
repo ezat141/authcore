@@ -1,6 +1,9 @@
 package com.authcore.token;
 
+import com.authcore.tenant.TenantContext;
+import com.authcore.user.AuthCoreUserPrincipal;
 import com.authcore.user.UserRepository;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.oauth2.server.authorization.OAuth2TokenType;
 import org.springframework.security.oauth2.server.authorization.token.JwtEncodingContext;
 import org.springframework.security.oauth2.server.authorization.token.OAuth2TokenCustomizer;
@@ -34,7 +37,18 @@ public class AuthCoreTokenCustomizer implements OAuth2TokenCustomizer<JwtEncodin
         }
 
         String principalName = context.getPrincipal().getName();
-        userRepository.findByUsername(principalName).ifPresent(user -> {
+        String tenant = tenantOf(context);
+        if (tenant == null) {
+            // No authenticated user behind this token (client credentials). Scope is
+            // already the whole story there.
+            return;
+        }
+
+        userRepository.findByTenantSlugAndUsername(tenant, principalName).ifPresent(user -> {
+            // Pins the token to the tenant it was issued for, so a resource server can
+            // reject a token replayed against a different tenant without a lookup.
+            context.getClaims().claim("tenant", user.getTenantSlug());
+
             Set<String> roles = user.roleNames();
             Set<String> permissions = user.permissionNames();
 
@@ -47,5 +61,22 @@ public class AuthCoreTokenCustomizer implements OAuth2TokenCustomizer<JwtEncodin
                 context.getClaims().claim("permissions", permissions);
             }
         });
+    }
+
+    /**
+     * Takes the tenant from the authenticated principal, not from the current request.
+     *
+     * <p>This runs while handling {@code /oauth2/token}, which the client's backend or a
+     * CLI issues — no subdomain, no {@code X-Tenant} header, no session. Reading
+     * {@link TenantContext} here quietly yields the default tenant and mislabels every
+     * token. The principal was resolved during login, in the tenant that actually
+     * authenticated the user, so it is the only trustworthy source at this point.
+     */
+    private static String tenantOf(JwtEncodingContext context) {
+        Authentication principal = context.getPrincipal();
+        if (principal != null && principal.getPrincipal() instanceof AuthCoreUserPrincipal user) {
+            return user.getTenantSlug();
+        }
+        return null;
     }
 }

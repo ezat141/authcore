@@ -9,8 +9,18 @@ import com.authcore.apikey.ApiKeyAuthenticationFilter;
 import com.authcore.apikey.ApiKeyAuthenticationProvider;
 import com.authcore.apikey.ApiKeyStore;
 import com.authcore.security.AuthCoreJwtAuthoritiesConverter;
+import com.authcore.tenant.TenantAuthorizationManager;
+import com.authcore.tenant.TenantResolutionFilter;
+import com.authcore.tenant.TenantService;
 import com.authcore.token.AuthCoreTokenCustomizer;
+import org.springframework.security.authorization.AuthenticatedAuthorizationManager;
+import org.springframework.security.authorization.AuthorityAuthorizationManager;
+import org.springframework.security.authorization.AuthorizationManager;
+import org.springframework.security.web.access.intercept.RequestAuthorizationContext;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import com.authcore.user.AuthCoreJacksonModules;
 import com.authcore.user.UserRepository;
+import tools.jackson.databind.json.JsonMapper;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import com.authcore.token.PublicRefreshTokenAuthenticationConverter;
 import com.authcore.token.PublicRefreshTokenAuthenticationProvider;
@@ -72,7 +82,7 @@ public class AuthorizationServerConfig {
     @Bean
     @Order(1)
     public SecurityFilterChain resourceApiSecurityFilterChain(
-            HttpSecurity http, ApiKeyStore apiKeyStore) throws Exception {
+            HttpSecurity http, ApiKeyStore apiKeyStore, TenantService tenantService) throws Exception {
         ApiKeyAuthenticationFilter apiKeyFilter = new ApiKeyAuthenticationFilter(
                 new ProviderManager(new ApiKeyAuthenticationProvider(apiKeyStore)));
 
@@ -80,13 +90,16 @@ public class AuthorizationServerConfig {
             .securityMatcher("/api/**")
             .authorizeHttpRequests(authorize -> authorize
                 .requestMatchers(HttpMethod.GET, "/api/machine/**")
-                    .hasAuthority("SCOPE_payments:read")
+                    .access(tenantScoped(AuthorityAuthorizationManager.hasAuthority("SCOPE_payments:read")))
                 .requestMatchers(HttpMethod.POST, "/api/machine/**")
-                    .hasAuthority("SCOPE_payments:write")
-                .anyRequest().authenticated())
+                    .access(tenantScoped(AuthorityAuthorizationManager.hasAuthority("SCOPE_payments:write")))
+                .anyRequest()
+                    .access(tenantScoped(AuthenticatedAuthorizationManager.authenticated())))
             .oauth2ResourceServer(resourceServer -> resourceServer
                 .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter())))
             .addFilterBefore(apiKeyFilter, BearerTokenAuthenticationFilter.class)
+            // Tenant must be known before anything authenticates or authorizes.
+            .addFilterBefore(new TenantResolutionFilter(tenantService), ApiKeyAuthenticationFilter.class)
             // Machine callers present a credential on every request; a session would
             // only add server state and CSRF exposure for nothing.
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
@@ -100,6 +113,12 @@ public class AuthorizationServerConfig {
         return new ApiKeyStore(jdbc);
     }
 
+    /** Wraps a rule so a token from another tenant is refused even when the rule passes. */
+    private static AuthorizationManager<RequestAuthorizationContext> tenantScoped(
+            AuthorizationManager<RequestAuthorizationContext> delegate) {
+        return new TenantAuthorizationManager(delegate);
+    }
+
     /** Reads roles and permissions out of the JWT, not just scope. */
     private static JwtAuthenticationConverter jwtAuthenticationConverter() {
         JwtAuthenticationConverter converter = new JwtAuthenticationConverter();
@@ -111,8 +130,13 @@ public class AuthorizationServerConfig {
     @Order(2)
     public SecurityFilterChain securityFilterChain(
             HttpSecurity http,
-            RegisteredClientRepository registeredClientRepository) throws Exception {
+            RegisteredClientRepository registeredClientRepository,
+            TenantService tenantService) throws Exception {
         http
+            // Runs before authentication so /oauth2/authorize and the /login POST both
+            // resolve the same tenant — the login form itself carries no tenant hint.
+            .addFilterBefore(new TenantResolutionFilter(tenantService),
+                    UsernamePasswordAuthenticationFilter.class)
             .with(new OAuth2AuthorizationServerConfigurer(), configurer -> configurer
                 .oidc(withDefaults())
                 // Teach the token endpoint how to authenticate a public client on the
@@ -123,6 +147,10 @@ public class AuthorizationServerConfig {
                             registeredClientRepository))))
             .authorizeHttpRequests(authorize -> authorize
                 .requestMatchers("/actuator/**").permitAll()
+                // The redirect target must be reachable without a session: the browser
+                // arrives here on 127.0.0.1 while the login happened on localhost, and
+                // no cookie crosses between them.
+                .requestMatchers("/authorized").permitAll()
                 .anyRequest().authenticated())
             .formLogin(withDefaults());
 
@@ -153,8 +181,27 @@ public class AuthorizationServerConfig {
             RegisteredClientRepository registeredClientRepository,
             RefreshTokenFamilyStore refreshTokenFamilyStore) {
         return new ReuseDetectingOAuth2AuthorizationService(
-                new JdbcOAuth2AuthorizationService(jdbc, registeredClientRepository),
+                jdbcAuthorizationService(jdbc, registeredClientRepository),
                 refreshTokenFamilyStore);
+    }
+
+    /**
+     * The stock service with one change: an {@code ObjectMapper} that can read our custom
+     * principal back out of the {@code attributes} column.
+     */
+    private static JdbcOAuth2AuthorizationService jdbcAuthorizationService(
+            JdbcOperations jdbc, RegisteredClientRepository registeredClientRepository) {
+        JdbcOAuth2AuthorizationService service =
+                new JdbcOAuth2AuthorizationService(jdbc, registeredClientRepository);
+        JsonMapper jsonMapper = AuthCoreJacksonModules.authorizationJsonMapper();
+
+        service.setAuthorizationRowMapper(
+                new JdbcOAuth2AuthorizationService.JsonMapperOAuth2AuthorizationRowMapper(
+                        registeredClientRepository, jsonMapper));
+        service.setAuthorizationParametersMapper(
+                new JdbcOAuth2AuthorizationService.JsonMapperOAuth2AuthorizationParametersMapper(jsonMapper));
+
+        return service;
     }
 
     // M2: consent decisions survive server restarts — no re-consent on every login.
