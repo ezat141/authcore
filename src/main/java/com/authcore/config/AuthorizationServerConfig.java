@@ -1,13 +1,14 @@
 package com.authcore.config;
 
-import com.nimbusds.jose.jwk.JWKSet;
-import com.nimbusds.jose.jwk.RSAKey;
-import com.nimbusds.jose.jwk.source.ImmutableJWKSet;
 import com.nimbusds.jose.jwk.source.JWKSource;
 import com.nimbusds.jose.proc.SecurityContext;
 import com.authcore.apikey.ApiKeyAuthenticationFilter;
 import com.authcore.apikey.ApiKeyAuthenticationProvider;
 import com.authcore.apikey.ApiKeyStore;
+import com.authcore.keys.JpaJwkSource;
+import com.authcore.keys.KeyCipher;
+import com.authcore.keys.SigningKeyService;
+import org.springframework.beans.factory.annotation.Value;
 import com.authcore.security.AuthCoreJwtAuthoritiesConverter;
 import com.authcore.tenant.TenantAuthorizationManager;
 import com.authcore.tenant.TenantResolutionFilter;
@@ -58,12 +59,9 @@ import org.springframework.security.oauth2.server.authorization.client.Registere
 import org.springframework.security.oauth2.server.authorization.settings.AuthorizationServerSettings;
 import org.springframework.security.web.SecurityFilterChain;
 
-import java.security.KeyPair;
-import java.security.KeyPairGenerator;
-import java.security.NoSuchAlgorithmException;
-import java.security.interfaces.RSAPrivateKey;
-import java.security.interfaces.RSAPublicKey;
 import java.util.UUID;
+
+import java.util.List;
 
 import static org.springframework.security.config.Customizer.withDefaults;
 
@@ -212,25 +210,25 @@ public class AuthorizationServerConfig {
         return new JdbcOAuth2AuthorizationConsentService(jdbc, registeredClientRepository);
     }
 
-    // M7 replaces this with JpaJwkSource + key rotation from DB.
+    /**
+     * Master key for encrypting signing keys at rest.
+     *
+     * <p>Defaulted so the project starts with no setup. That default is a published
+     * constant and therefore no secret at all — any real deployment must override
+     * {@code authcore.keys.master-key}, and better still keep the material in a KMS.
+     */
     @Bean
-    public JWKSource<SecurityContext> jwkSource() {
-        KeyPair keyPair = generateRsaKey();
-        RSAKey rsaKey = new RSAKey.Builder((RSAPublicKey) keyPair.getPublic())
-            .privateKey((RSAPrivateKey) keyPair.getPrivate())
-            .keyID(UUID.randomUUID().toString())
-            .build();
-        return new ImmutableJWKSet<>(new JWKSet(rsaKey));
+    public KeyCipher keyCipher(
+            @Value("${authcore.keys.master-key:YXV0aGNvcmUtZGV2LW9ubHktbWFzdGVyLWtleS0zMmI=}")
+            String masterKey) {
+        return new KeyCipher(masterKey);
     }
 
-    private static KeyPair generateRsaKey() {
-        try {
-            KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
-            generator.initialize(2048);
-            return generator.generateKeyPair();
-        } catch (NoSuchAlgorithmException ex) {
-            throw new IllegalStateException(ex);
-        }
+    // M7: keys live in the database, so a restart no longer invalidates every token.
+    @Bean
+    public JpaJwkSource jwkSource(SigningKeyService signingKeyService) {
+        signingKeyService.initialize();
+        return new JpaJwkSource(signingKeyService);
     }
 
     @Bean
@@ -245,7 +243,14 @@ public class AuthorizationServerConfig {
     @Bean
     public OAuth2TokenGenerator<? extends OAuth2Token> tokenGenerator(
             JWKSource<SecurityContext> jwkSource, UserRepository userRepository) {
-        JwtGenerator jwtGenerator = new JwtGenerator(new NimbusJwtEncoder(jwkSource));
+        NimbusJwtEncoder jwtEncoder = new NimbusJwtEncoder(jwkSource);
+        // While a rotation is in flight both the active and the retiring key match the
+        // encoder's query, and its default response to an ambiguous match is to refuse to
+        // sign at all — which would take the token endpoint down for the length of the
+        // overlap. JpaJwkSource guarantees the active key is first, so first is correct.
+        jwtEncoder.setJwkSelector(List::getFirst);
+
+        JwtGenerator jwtGenerator = new JwtGenerator(jwtEncoder);
         // SAS only auto-applies an OAuth2TokenCustomizer bean to the generator it builds
         // itself. We supply our own generator, so the customizer must be set here or the
         // roles/permissions claims silently never appear.
