@@ -2,7 +2,7 @@
 
 A production-shaped OAuth2 / OpenID Connect authorization server built on Spring Authorization Server 7 and Java 21.
 
-AuthCore issues RS256-signed JWTs for three different kinds of client — a server-side web app, a browser SPA, and a machine service — and enforces what each token holder may actually do through role- and permission-based access control. Every credential, token, and consent decision lives in PostgreSQL, so nothing is lost across a restart.
+AuthCore issues RS256-signed JWTs for three different kinds of client — a server-side web app, a browser SPA, and a machine service — and enforces what each token holder may actually do through role- and permission-based access control. Multiple isolated tenants share one server, so the same username can belong to two unrelated people. Every credential, token, and consent decision lives in PostgreSQL, so nothing is lost across a restart.
 
 This is a learning-driven portfolio project, but the security decisions are the real ones: PKCE is mandatory for public clients, refresh tokens rotate on every use, and replaying a retired refresh token revokes the entire token family per [OAuth 2.0 Security BCP §4.14](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics).
 
@@ -61,6 +61,7 @@ Run the test suite (Testcontainers starts its own throwaway PostgreSQL, so Docke
 | API keys | `X-API-Key` for callers that are not OAuth2 clients |
 | RBAC | Users → roles → permissions, surfaced as JWT claims |
 | Method security | `@PreAuthorize` including per-record ownership checks |
+| Multi-tenancy | Tenant-scoped users and roles; tokens pinned to their tenant |
 | Full persistence | Users, clients, tokens, and consents all in PostgreSQL |
 
 **Stack:** Java 21 · Spring Boot 4.1 · Spring Authorization Server 7.1 · PostgreSQL 16 · Flyway · Testcontainers · Redis and Kafka (provisioned, reserved for later milestones)
@@ -78,6 +79,7 @@ graph TB
     end
 
     subgraph AuthCore
+        TENANT["TenantResolutionFilter<br/>subdomain · X-Tenant · ?tenant"]
         subgraph "Chain 2 — authorization server"
             AUTHZ["/oauth2/authorize<br/>form login + consent"]
             TOKEN["/oauth2/token"]
@@ -86,23 +88,28 @@ graph TB
         subgraph "Chain 1 — resource API, stateless"
             APIKEY["ApiKeyAuthenticationFilter"]
             BEARER["Bearer JWT filter"]
+            TAM["TenantAuthorizationManager<br/>token tenant must match request"]
             RES["/api/**<br/>@PreAuthorize"]
         end
-        CUSTOM["AuthCoreTokenCustomizer<br/>injects roles + permissions"]
+        CUSTOM["AuthCoreTokenCustomizer<br/>injects tenant + roles + permissions"]
         REUSE["ReuseDetectingAuthorizationService<br/>refresh family revocation"]
     end
 
-    PG[("PostgreSQL<br/>users · roles · clients<br/>tokens · consents · api keys")]
+    PG[("PostgreSQL<br/>tenants · users · roles · clients<br/>tokens · consents · api keys")]
 
-    WEB --> AUTHZ
-    SPA --> AUTHZ
-    SVC --> TOKEN
+    WEB --> TENANT
+    SPA --> TENANT
+    SVC --> TENANT
+    TENANT --> AUTHZ
+    TENANT --> TOKEN
+    TENANT --> APIKEY
     SVC -.->|X-API-Key| APIKEY
     AUTHZ --> TOKEN
     TOKEN --> CUSTOM
     TOKEN --> REUSE
-    APIKEY --> RES
-    BEARER --> RES
+    APIKEY --> TAM
+    BEARER --> TAM
+    TAM --> RES
     CUSTOM --> PG
     REUSE --> PG
     OIDC --> PG
@@ -114,6 +121,8 @@ Two security filter chains, split by purpose:
 - **Chain 2** handles everything else: the OAuth2/OIDC protocol endpoints plus form login and the consent screen.
 
 The split is deliberate rather than cosmetic. An earlier two-chain arrangement broke the authorization-code flow, because the request cache that stores the pending `/oauth2/authorize` request could not be restored across chain boundaries after login. `/api/**` never participates in that redirect, so it can be isolated safely while login and the protocol endpoints stay together.
+
+`TenantResolutionFilter` runs first in both chains — the tenant has to be known before anything authenticates, since a username alone no longer identifies a person.
 
 ---
 
@@ -131,6 +140,7 @@ The split is deliberate rather than cosmetic. An earlier two-chain arrangement b
 | `POST /oauth2/revoke` | Token revocation | client credentials |
 | `POST /oauth2/introspect` | Token introspection | client credentials |
 | `GET /connect/logout` | RP-initiated logout | session |
+| `GET /authorized` | Redirect landing page, displays the code | public |
 
 ### Demo resource API
 
@@ -149,6 +159,15 @@ The split is deliberate rather than cosmetic. An earlier two-chain arrangement b
 
 Local development values, created on first boot.
 
+### Tenants
+
+| Slug | Name |
+|---|---|
+| `default` | Default Tenant |
+| `acme` | Acme Corporation |
+
+Select one per request via subdomain (`acme.authcore.local`), an `X-Tenant` header, or a `tenant` query parameter. Unspecified means `default`.
+
 ### Clients
 
 | Client ID | Type | Grants | Secret |
@@ -159,12 +178,25 @@ Local development values, created on first boot.
 
 Redirect URI for both interactive clients: `http://127.0.0.1:8080/authorized`
 
+Clients are **not** tenant-scoped. One SPA serving many organisations is the ordinary SaaS shape — the tenant comes from who logs in, not from which app asked.
+
 ### Users
 
-| Username | Password | Role | Permissions |
+| Tenant | Username | Password | Role |
 |---|---|---|---|
-| `ezzat` | `password` | `ROLE_USER` | `accounts:read`, `payments:read` |
-| `admin` | `admin-password` | `ROLE_ADMIN` | + `payments:write`, `accounts:read:all` |
+| `default` | `ezzat` | `password` | `ROLE_USER` |
+| `default` | `admin` | `admin-password` | `ROLE_ADMIN` |
+| `acme` | `ezzat` | `acme-password` | `ROLE_USER` |
+| `acme` | `alice` | `alice-password` | `ROLE_ADMIN` |
+
+The two `ezzat` rows are deliberate: different tenants, different passwords, different people. Usernames are unique per tenant, not globally.
+
+| Role | Permissions |
+|---|---|
+| `ROLE_USER` | `accounts:read`, `payments:read` |
+| `ROLE_ADMIN` | + `payments:write`, `accounts:read:all` |
+
+Roles are defined per tenant, so each tenant owns its own `ROLE_ADMIN`. Permissions are global — they are a capability vocabulary, not policy.
 
 ### API key
 
@@ -186,7 +218,7 @@ Open in a browser and log in as `ezzat` / `password`:
 http://localhost:8080/oauth2/authorize?response_type=code&client_id=authcore-spa&redirect_uri=http://127.0.0.1:8080/authorized&scope=openid%20payments:read&code_challenge=jOE5exqeFE_I-Pd0J6sXoCuGr4fI1i-07DziFgujcnQ&code_challenge_method=S256
 ```
 
-The browser lands on `http://127.0.0.1:8080/authorized?code=...` — no page is served there, the code in the URL is the point. Exchange it, sending **no client secret**:
+The browser lands on `http://127.0.0.1:8080/authorized`, which displays the code. Exchange it, sending **no client secret**:
 
 ```bash
 curl -X POST http://localhost:8080/oauth2/token \
@@ -202,6 +234,7 @@ The access token carries the user's actual capabilities, not just the client's r
 ```json
 {
   "sub": "ezzat",
+  "tenant": "default",
   "scope": ["openid", "payments:read"],
   "roles": ["USER"],
   "permissions": ["accounts:read", "payments:read"]
@@ -275,6 +308,41 @@ The same five requests, the same code, two different users:
 
 Nothing branches on the username. `admin` differs only by the rows linking it to `ROLE_ADMIN`.
 
+### 5. Tenant isolation
+
+Log in to Acme by adding `&tenant=acme` to the authorize URL. Use a private window so no session from a previous tenant is reused:
+
+```
+http://localhost:8080/oauth2/authorize?response_type=code&client_id=authcore-spa&redirect_uri=http://127.0.0.1:8080/authorized&scope=openid%20payments:read&code_challenge=jOE5exqeFE_I-Pd0J6sXoCuGr4fI1i-07DziFgujcnQ&code_challenge_method=S256&tenant=acme
+```
+
+Two logins worth trying, in order:
+
+1. **`ezzat` / `password`** — the *default* tenant's password. Rejected. That user exists and that password is correct, but not here. The lookup is scoped to the tenant, so the other `ezzat` is not merely unauthorized — it is invisible.
+2. **`ezzat` / `acme-password`** — Acme's own `ezzat`. Accepted.
+
+The resulting token names its tenant:
+
+```json
+{ "sub": "ezzat", "tenant": "acme", "roles": ["USER"] }
+```
+
+That claim is enforced, not decorative. The same token, against two different tenants:
+
+```bash
+# Its own tenant
+curl -i http://localhost:8080/api/accounts/ezzat \
+  -H "Authorization: Bearer ACME_TOKEN" -H "X-Tenant: acme"
+# => 200
+
+# Someone else's tenant — same signature, same expiry, still refused
+curl -i http://localhost:8080/api/accounts/ezzat \
+  -H "Authorization: Bearer ACME_TOKEN" -H "X-Tenant: default"
+# => 403
+```
+
+A valid signature proves the token is genuine. It says nothing about whether it is being used where it belongs.
+
 ---
 
 ## Notable design decisions
@@ -312,6 +380,50 @@ This looks wrong until the threat model is considered. Passwords need a delibera
 
 A URL pattern cannot see *which* account is being requested. `AuthCorePermissionEvaluator` fills that gap: a caller reaches their own record with `accounts:read`, or any record with `accounts:read:all`. The blanket grant stays deliberate instead of being the default.
 
+### What is tenant-scoped, and what is not
+
+Scoping everything uniformly would be simpler and wrong:
+
+| | Scope | Why |
+|---|---|---|
+| Users | per tenant | `alice@acme` and `alice@globex` are different people; uniqueness is `(tenant, username)` |
+| Roles | per tenant | Acme's `ROLE_ADMIN` must grant nothing at Globex |
+| Permissions | global | A capability vocabulary (`payments:write`), not policy |
+| Clients | global | One SPA serving many tenants is the ordinary SaaS shape |
+
+The tenant is resolved from the subdomain, an `X-Tenant` header, or a `tenant` query parameter, and then held in a `ThreadLocal`. That is not the first choice for passing state, but `UserDetailsService.loadUserByUsername` accepts a username and nothing else, and Spring resolves the user deep inside the authentication machinery with no access to the request.
+
+Resolution is sticky for the session, which is load-bearing rather than a convenience: the login form POST carries none of the original request's tenant hints, so without remembering it, every non-default user would be authenticated against the wrong tenant.
+
+### Isolation is enforced in two places, because they are different problems
+
+Scoping the user lookup prevents cross-tenant **authentication** — a user in another tenant is not found, so their password is never compared. It says nothing about a token that has already been issued.
+
+`TenantAuthorizationManager` covers the second half. A correctly signed, unexpired token from tenant A would otherwise work perfectly against tenant B's data, because the signature proves the token is genuine, not that it is being used where it belongs. Callers with no tenant claim — client credentials, API keys — are left to the other rules, since they are not tenant-bound.
+
+### A custom principal needs a mixin *and* a type-validator entry
+
+This one cost real debugging time and is worth writing down.
+
+`JdbcOAuth2AuthorizationService` serialises the authenticated principal into the `attributes` column and reads it back when the code is exchanged. Storing the tenant on a custom `UserDetails` therefore requires that class to survive a JSON round trip.
+
+The failure mode is unpleasant. **Writing succeeds with no warning** — the row lands in the database looking entirely correct. Only the read fails, one step later, surfacing as a bare `401` from the token endpoint with nothing in the response or the default logs mentioning serialisation. Two separate things are required, and having only the first still fails identically:
+
+```java
+BasicPolymorphicTypeValidator.Builder typeValidator = BasicPolymorphicTypeValidator.builder()
+        .allowIfSubType(AuthCoreUserPrincipal.class);
+
+JsonMapper.builder()
+        .addModules(SecurityJacksonModules.getModules(classLoader, typeValidator))
+        .addModule(new OAuth2AuthorizationServerJacksonModule())
+        .addMixIn(AuthCoreUserPrincipal.class, AuthCoreUserPrincipalMixin.class)
+        .build();
+```
+
+The mixin tells Jackson which constructor to call; the validator decides whether the class may be named as a type at all. The validator exists to stop stored JSON from instantiating arbitrary classes, so it is extended with one entry rather than disabled.
+
+A version trap sits alongside it: Spring Authorization Server 7.1 ships adapters for both Jackson versions. The obvious-looking `OAuth2AuthorizationRowMapper` is the Jackson 2 one, while Spring Boot 4 uses Jackson 3 — the correct classes are `JsonMapperOAuth2Authorization*`.
+
 ### Claims are only useful once they are enforced
 
 Two wiring steps that fail silently if missed, both worth knowing about:
@@ -327,6 +439,8 @@ Two wiring steps that fail silently if missed, both worth knowing about:
 
 ```mermaid
 erDiagram
+    tenants ||--o{ users : owns
+    tenants ||--o{ roles : defines
     users ||--o{ user_roles : has
     roles ||--o{ user_roles : granted_to
     roles ||--o{ role_permissions : bundles
@@ -334,19 +448,26 @@ erDiagram
     oauth2_registered_client ||--o{ oauth2_authorization : issues
     oauth2_authorization ||--o{ refresh_token_family : lineage
 
+    tenants {
+        uuid id PK
+        string slug UK
+        boolean enabled
+    }
     users {
         uuid id PK
-        string username UK
+        uuid tenant_id FK
+        string username "unique per tenant"
         string password_hash
         boolean enabled
     }
     roles {
         uuid id PK
-        string name UK
+        uuid tenant_id FK
+        string name "unique per tenant"
     }
     permissions {
         uuid id PK
-        string name UK
+        string name UK "global"
     }
     refresh_token_family {
         string token_hash PK
@@ -361,7 +482,7 @@ erDiagram
     }
 ```
 
-Eight Flyway migrations, applied in order:
+Nine Flyway migrations, applied in order:
 
 | Migration | Adds |
 |---|---|
@@ -373,8 +494,9 @@ Eight Flyway migrations, applied in order:
 | `V6` | `refresh_token_family` |
 | `V7` | `api_keys` |
 | `V8` | `roles`, `permissions`, join tables — migrates and drops `user_authorities` |
+| `V9` | `tenants`; moves user and role uniqueness to `(tenant, name)` |
 
-`V8` copies existing authority assignments into the new role tables before dropping the old one, so no grants are lost on upgrade.
+`V8` copies existing authority assignments into the new role tables before dropping the old one, and `V9` assigns every pre-existing user and role to the `default` tenant before making `tenant_id` non-nullable. Neither drops data on upgrade.
 
 ---
 
@@ -384,7 +506,7 @@ Eight Flyway migrations, applied in order:
 ./mvnw test
 ```
 
-27 tests. Integration tests run against a real PostgreSQL via Testcontainers rather than an in-memory substitute, so migrations and SQL are exercised as written.
+39 tests. Integration tests run against a real PostgreSQL via Testcontainers rather than an in-memory substitute, so migrations and SQL are exercised as written.
 
 | Suite | Covers |
 |---|---|
@@ -394,6 +516,11 @@ Eight Flyway migrations, applied in order:
 | `ApiKeyAuthenticationProviderTest` | Unknown, disabled, and expired keys |
 | `PermissionEvaluatorTest` | Owner, non-owner, and `:all` permission combinations |
 | `JwtAuthoritiesConverterTest` | Scope, role, and permission claim mapping |
+| `TenantIsolationTest` | Users invisible across tenants; same username, different people |
+| `TenantAuthorizationManagerTest` | A valid token from another tenant is refused |
+| `TokenCustomizerTenantTest` | The tenant claim follows the principal, not the request |
+
+The last one is regression cover for a defect the rest of the suite could not have caught: the tenant claim was originally read from the current request, which is empty during `/oauth2/token` because that call comes from the client's backend rather than the user's browser. Every test passed while every token carried the wrong tenant — the tests asserted the mechanism that had been built rather than the behaviour that was wanted. It was found by driving the browser flow by hand.
 
 ---
 
@@ -402,8 +529,8 @@ Eight Flyway migrations, applied in order:
 Honest about what this is not, yet:
 
 - **Signing keys are generated in memory at startup.** Every restart invalidates previously issued tokens. Persisted keys with rotation are the next milestone.
-- **No multi-tenancy.** Single realm; tenant isolation is planned.
-- **No rate limiting or brute-force protection** on the token or login endpoints.
+- **Clients are shared across tenants.** Deliberate — one app serving many organisations — but a deployment needing per-tenant client registration would have to replace `JdbcRegisteredClientRepository`.
+- **No tenant-scoped rate limiting**, or any rate limiting or brute-force protection on the token and login endpoints.
 - **Demo credentials are seeded on boot**, which is convenient locally and wrong anywhere else.
 - **Redis and Kafka are provisioned but unused** — they are placed for the sessions and audit-event milestones.
 
@@ -419,7 +546,7 @@ Honest about what this is not, yet:
 | M3 | PKCE, public clients, reuse detection | ✅ |
 | M4 | Client credentials and API keys | ✅ |
 | M5 | RBAC and method security | ✅ |
-| M6 | Multi-tenancy | planned |
+| M6 | Multi-tenancy | ✅ |
 | M7 | Key rotation and JWKS management | planned |
 | M8–M11 | Audit events, MFA, observability, hardening | planned |
 
