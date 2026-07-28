@@ -101,12 +101,14 @@ public class DataSeeder implements ApplicationRunner {
         Permission accountsReadAll = permission("accounts:read:all",  "Read any account, regardless of owner");
         Permission keysRead        = permission("keys:read",          "Inspect signing keys");
         Permission keysRotate      = permission("keys:rotate",        "Rotate the active signing key");
+        Permission clientsRotate   = permission("clients:rotate-secret", "Rotate a client secret");
 
         Role user = role(tenant, "ROLE_USER", "Standard end user");
         addPermissions(user, paymentsRead, accountsRead);
 
         Role admin = role(tenant, "ROLE_ADMIN", "Administrator");
-        addPermissions(admin, paymentsRead, paymentsWrite, accountsRead, accountsReadAll, keysRead, keysRotate);
+        addPermissions(admin, paymentsRead, paymentsWrite, accountsRead, accountsReadAll,
+                keysRead, keysRotate, clientsRotate);
     }
 
     private Permission permission(String name, String description) {

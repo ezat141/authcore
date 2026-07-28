@@ -5,6 +5,8 @@ import com.nimbusds.jose.proc.SecurityContext;
 import com.authcore.apikey.ApiKeyAuthenticationFilter;
 import com.authcore.apikey.ApiKeyAuthenticationProvider;
 import com.authcore.apikey.ApiKeyStore;
+import com.authcore.client.ClientSecretRotationStore;
+import com.authcore.client.PreviousSecretAuthenticationProvider;
 import com.authcore.keys.JpaJwkSource;
 import com.authcore.keys.KeyCipher;
 import com.authcore.keys.SigningKeyService;
@@ -116,6 +118,11 @@ public class AuthorizationServerConfig {
         return new ApiKeyStore(jdbc);
     }
 
+    @Bean
+    public ClientSecretRotationStore clientSecretRotationStore(JdbcOperations jdbc) {
+        return new ClientSecretRotationStore(jdbc);
+    }
+
     /** Wraps a rule so a token from another tenant is refused even when the rule passes. */
     private static AuthorizationManager<RequestAuthorizationContext> tenantScoped(
             AuthorizationManager<RequestAuthorizationContext> delegate) {
@@ -136,7 +143,9 @@ public class AuthorizationServerConfig {
             RegisteredClientRepository registeredClientRepository,
             TenantService tenantService,
             RevocationService revocationService,
-            RefreshTokenFamilyStore refreshTokenFamilyStore) throws Exception {
+            RefreshTokenFamilyStore refreshTokenFamilyStore,
+            ClientSecretRotationStore clientSecretRotationStore,
+            PasswordEncoder passwordEncoder) throws Exception {
         http
             // Runs before authentication so /oauth2/authorize and the /login POST both
             // resolve the same tenant — the login form itself carries no tenant hint.
@@ -154,7 +163,11 @@ public class AuthorizationServerConfig {
                 .clientAuthentication(clientAuth -> clientAuth
                     .authenticationConverter(new PublicRefreshTokenAuthenticationConverter())
                     .authenticationProvider(new PublicRefreshTokenAuthenticationProvider(
-                            registeredClientRepository))))
+                            registeredClientRepository))
+                    // Consulted when the presented secret is not the current one, so a
+                    // secret still inside its overlap window keeps working.
+                    .authenticationProvider(new PreviousSecretAuthenticationProvider(
+                            registeredClientRepository, clientSecretRotationStore, passwordEncoder))))
             .authorizeHttpRequests(authorize -> authorize
                 .requestMatchers("/actuator/**").permitAll()
                 // The redirect target must be reachable without a session: the browser
