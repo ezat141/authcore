@@ -7,10 +7,6 @@ import org.springframework.security.oauth2.server.authorization.OAuth2Authorizat
 import org.springframework.security.oauth2.server.authorization.OAuth2AuthorizationService;
 import org.springframework.security.oauth2.server.authorization.OAuth2TokenType;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.UUID;
 
 /**
@@ -39,7 +35,7 @@ public class ReuseDetectingOAuth2AuthorizationService implements OAuth2Authoriza
     @Override
     public OAuth2Authorization findByToken(String token, OAuth2TokenType tokenType) {
         if (isRefreshTokenLookup(tokenType)) {
-            RefreshTokenRecord record = familyStore.findByTokenHash(sha256(token)).orElse(null);
+            RefreshTokenRecord record = familyStore.findByTokenHash(RefreshTokenFamilyStore.hash(token)).orElse(null);
             if (record != null && record.consumed()) {
                 revokeFamily(record);
                 // Returning null makes SAS answer the request with invalid_grant.
@@ -72,7 +68,7 @@ public class ReuseDetectingOAuth2AuthorizationService implements OAuth2Authoriza
         }
 
         String authorizationId = authorization.getId();
-        String tokenHash = sha256(refreshToken.getToken().getTokenValue());
+        String tokenHash = RefreshTokenFamilyStore.hash(refreshToken.getToken().getTokenValue());
 
         // A rotated token stays in the family it came from; a fresh login starts a new one.
         String familyId = familyStore.findFamilyIdByAuthorizationId(authorizationId)
@@ -99,12 +95,4 @@ public class ReuseDetectingOAuth2AuthorizationService implements OAuth2Authoriza
         return tokenType == null || OAuth2TokenType.REFRESH_TOKEN.equals(tokenType);
     }
 
-    private static String sha256(String value) {
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (NoSuchAlgorithmException ex) {
-            throw new IllegalStateException("SHA-256 is required but unavailable", ex);
-        }
-    }
 }
