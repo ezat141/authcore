@@ -6,6 +6,8 @@ AuthCore issues RS256-signed JWTs for three different kinds of client — a serv
 
 This is a learning-driven portfolio project, but the security decisions are the real ones: PKCE is mandatory for public clients, refresh tokens rotate on every use, and replaying a retired refresh token revokes the entire token family per [OAuth 2.0 Security BCP §4.14](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics).
 
+Signing keys, client secrets, and tokens can all be rotated or revoked **while the server is running**, without invalidating anything that is still legitimately in use.
+
 ---
 
 ## Contents
@@ -62,6 +64,9 @@ Run the test suite (Testcontainers starts its own throwaway PostgreSQL, so Docke
 | RBAC | Users → roles → permissions, surfaced as JWT claims |
 | Method security | `@PreAuthorize` including per-record ownership checks |
 | Multi-tenancy | Tenant-scoped users and roles; tokens pinned to their tenant |
+| Signing key rotation | Keys in PostgreSQL, encrypted at rest; retired keys keep verifying |
+| Token revocation | Redis deny-list by `jti`; a revoked JWT stops working at once |
+| Client secret rotation | Overlap window so clients can redeploy without an outage |
 | Full persistence | Users, clients, tokens, and consents all in PostgreSQL |
 
 **Stack:** Java 21 · Spring Boot 4.1 · Spring Authorization Server 7.1 · PostgreSQL 16 · Flyway · Testcontainers · Redis and Kafka (provisioned, reserved for later milestones)
@@ -93,9 +98,12 @@ graph TB
         end
         CUSTOM["AuthCoreTokenCustomizer<br/>injects tenant + roles + permissions"]
         REUSE["ReuseDetectingAuthorizationService<br/>refresh family revocation"]
+        JWK["JpaJwkSource<br/>active + retiring keys"]
+        REV["RevokedTokenValidator"]
     end
 
-    PG[("PostgreSQL<br/>tenants · users · roles · clients<br/>tokens · consents · api keys")]
+    PG[("PostgreSQL<br/>tenants · users · roles · clients<br/>tokens · consents · api keys<br/>signing keys · secret rotations")]
+    REDIS[("Redis<br/>revoked jti, TTL = token life")]
 
     WEB --> TENANT
     SPA --> TENANT
@@ -107,12 +115,16 @@ graph TB
     AUTHZ --> TOKEN
     TOKEN --> CUSTOM
     TOKEN --> REUSE
+    TOKEN --> JWK
     APIKEY --> TAM
-    BEARER --> TAM
+    BEARER --> REV
+    REV --> TAM
     TAM --> RES
     CUSTOM --> PG
     REUSE --> PG
-    OIDC --> PG
+    JWK --> PG
+    OIDC --> JWK
+    REV --> REDIS
 ```
 
 Two security filter chains, split by purpose:
@@ -152,6 +164,17 @@ The split is deliberate rather than cosmetic. An earlier two-chain arrangement b
 | `GET /api/accounts/{ownerId}` | `hasPermission(#ownerId, 'Account', 'read')` |
 | `POST /api/accounts/{ownerId}/payments` | `hasAuthority('payments:write')` |
 | `GET /api/accounts/admin/all` | `hasRole('ADMIN')` |
+
+### Operator API
+
+| Endpoint | Guard |
+|---|---|
+| `GET /api/admin/keys` | `hasAuthority('keys:read')` |
+| `POST /api/admin/keys/rotate` | `hasAuthority('keys:rotate')` |
+| `POST /api/admin/clients/{clientId}/rotate-secret` | `hasAuthority('clients:rotate-secret')` |
+| `POST /api/admin/clients/{clientId}/revoke-previous-secrets` | `hasAuthority('clients:rotate-secret')` |
+
+Key rotation has its own permission rather than sharing a general admin role — the set of people who should be able to re-key the server is smaller than the set who administer it.
 
 ---
 
@@ -194,7 +217,7 @@ The two `ezzat` rows are deliberate: different tenants, different passwords, dif
 | Role | Permissions |
 |---|---|
 | `ROLE_USER` | `accounts:read`, `payments:read` |
-| `ROLE_ADMIN` | + `payments:write`, `accounts:read:all` |
+| `ROLE_ADMIN` | + `payments:write`, `accounts:read:all`, `keys:read`, `keys:rotate`, `clients:rotate-secret` |
 
 Roles are defined per tenant, so each tenant owns its own `ROLE_ADMIN`. Permissions are global — they are a capability vocabulary, not policy.
 
@@ -343,6 +366,79 @@ curl -i http://localhost:8080/api/accounts/ezzat \
 
 A valid signature proves the token is genuine. It says nothing about whether it is being used where it belongs.
 
+### 6. Rotating the signing key
+
+Needs an admin token (`admin` / `admin-password`, then the code exchange from walkthrough 1).
+
+```bash
+curl -X POST http://localhost:8080/api/admin/keys/rotate \
+  -H "Authorization: Bearer ADMIN_TOKEN"
+```
+
+```
+before:  5b10b917  ACTIVE       ← a token issued now carries this kid
+         f66575a1  RETIRING
+
+ROTATE → 3d2851f2  ACTIVE
+         5b10b917  RETIRING
+         f66575a1  RETIRING
+
+token signed by the retired key  → 200   ← still valid
+token issued after the rotation  → 200   ← carries kid 3d2851f2
+JWKS                             → publishes all three
+```
+
+Re-keying is a live operation, not a maintenance window. That is the entire point: a rotation you are afraid to run is worse than no rotation button at all, because it creates the illusion of readiness. Retired keys are purged only once every token they signed has expired.
+
+### 7. Revoking a token
+
+```bash
+curl -X POST http://localhost:8080/oauth2/revoke \
+  -u authcore-machine:machine-secret \
+  -d "token=ACCESS_TOKEN&token_type_hint=access_token"
+```
+
+```
+before revoke        → 200
+POST /oauth2/revoke  → 200
+after revoke         → 401     ← immediate, not on expiry
+Redis TTL            → 599s    ← the token's own remaining lifetime
+a different token    → 200     ← blast radius of exactly one token
+```
+
+### 8. Rotating a client secret
+
+```bash
+curl -X POST http://localhost:8080/api/admin/clients/authcore-machine/rotate-secret \
+  -H "Authorization: Bearer ADMIN_TOKEN"
+```
+
+```json
+{
+  "newSecret": "vWAGAi3AA-surqTPtQCUpuasQzcC94OkJkivTYEPd-0",
+  "previousSecretAcceptedUntil": "2026-07-29T13:10:18Z"
+}
+```
+
+During the window both secrets authenticate, and nothing else does:
+
+```
+OLD secret    → 200    ← an instance that has not been redeployed yet
+NEW secret    → 200    ← one that has
+WRONG secret  → 401    ← the window widened to exactly one secret
+```
+
+Closing it early, for when the old secret is known to have leaked:
+
+```bash
+curl -X POST http://localhost:8080/api/admin/clients/authcore-machine/revoke-previous-secrets \
+  -H "Authorization: Bearer ADMIN_TOKEN"
+# => {"revoked": 1}
+#    OLD secret → 401,  NEW secret → 200
+```
+
+The new secret is returned once and stored hashed. Lose it and you rotate again rather than look it up.
+
 ---
 
 ## Notable design decisions
@@ -400,6 +496,41 @@ Resolution is sticky for the session, which is load-bearing rather than a conven
 Scoping the user lookup prevents cross-tenant **authentication** — a user in another tenant is not found, so their password is never compared. It says nothing about a token that has already been issued.
 
 `TenantAuthorizationManager` covers the second half. A correctly signed, unexpired token from tenant A would otherwise work perfectly against tenant B's data, because the signature proves the token is genuine, not that it is being used where it belongs. Callers with no tenant claim — client credentials, API keys — are left to the other rules, since they are not tenant-bound.
+
+### Every safe operation must survive being run in production
+
+The three rotation and revocation features solve one problem in three places: the naive implementation of each **looks correct and quietly turns the operation into an outage**, so nobody runs it.
+
+| Operation | Naive behaviour | Here |
+|---|---|---|
+| Rotate signing key | delete the old key → every recent token rejected | old key keeps verifying until its tokens expire |
+| Rotate client secret | replace in place → every un-redeployed instance breaks | both secrets valid for an overlap window |
+| Revoke a JWT | mark the stored authorization invalid → nothing happens | `jti` deny-listed, refused immediately |
+
+The third is the worst of them. Stock `/oauth2/revoke` marks the stored authorization invalid, which does nothing for a token a resource server validates by signature alone — so the endpoint returned `200` while the token kept working everywhere it mattered. That is more dangerous than having no revocation endpoint, because it looks like it worked.
+
+A deliberate consequence: the deny-list is keyed by `jti` and each entry's TTL is the token's own remaining lifetime. A revoked token stops being interesting once it would have expired anyway, so the list is self-limiting, and it holds no credentials — leaking it reveals which tokens were revoked, not how to use any.
+
+### One ACTIVE signing key, enforced by the database
+
+```sql
+CREATE UNIQUE INDEX idx_signing_keys_one_active
+    ON signing_keys (status) WHERE status = 'ACTIVE';
+```
+
+Two active keys would be a bug no caller could ever detect: tokens verify either way, and *which* key signed them becomes a race. There is no failing request to alert on, so the invariant is enforced where it cannot be bypassed rather than trusted to application code.
+
+Private keys are AES-GCM encrypted at rest. A stolen signing key forges every identity at once and leaves nothing in the audit log, so a database dump must not be enough to mint tokens. GCM rather than CBC so tampering is detected instead of decrypting to garbage. The master key lives in configuration, which moves the secret out of the database but not out of the deployment — a production system would hold it in a KMS so the private key is never assembled in application memory at all.
+
+### Rotation broke token issuance, and the first fix was also wrong
+
+Worth recording because the failure mode is instructive.
+
+With two keys published, `NimbusJwtEncoder` finds both acceptable for RS256 and, by default, refuses to sign rather than choose. The first rotation therefore made **every token request fail** — at precisely the moment an operator would be rotating in anger.
+
+The first attempt at a fix inspected the `JWKMatcher` to work out whether a query was "for signing". It guessed wrong: the real matcher is `.algorithms(RS256, null)`, and that `null` means keys with no algorithm set — exactly what ours are — also match. **The test written alongside it encoded the same wrong guess**, so it passed against a fix that did not work.
+
+Reading the encoder's source showed it already has a documented hook for this, `setJwkSelector(List::getFirst)`, which is what the code now uses. The test drives the real encoder and asserts the `kid` it actually signs with, rather than asserting anything about how it queries.
 
 ### A custom principal needs a mixin *and* a type-validator entry
 
@@ -480,9 +611,21 @@ erDiagram
         string scopes
         timestamp expires_at
     }
+    signing_keys {
+        uuid id PK
+        string kid UK
+        string private_key "AES-GCM encrypted"
+        string status "ACTIVE or RETIRING"
+    }
+    client_secret_rotations {
+        uuid id PK
+        string client_id
+        string previous_secret "hashed"
+        timestamp expires_at
+    }
 ```
 
-Nine Flyway migrations, applied in order:
+Eleven Flyway migrations, applied in order:
 
 | Migration | Adds |
 |---|---|
@@ -495,6 +638,8 @@ Nine Flyway migrations, applied in order:
 | `V7` | `api_keys` |
 | `V8` | `roles`, `permissions`, join tables — migrates and drops `user_authorities` |
 | `V9` | `tenants`; moves user and role uniqueness to `(tenant, name)` |
+| `V10` | `signing_keys`, with a partial unique index enforcing one ACTIVE key |
+| `V11` | `client_secret_rotations` |
 
 `V8` copies existing authority assignments into the new role tables before dropping the old one, and `V9` assigns every pre-existing user and role to the `default` tenant before making `tenant_id` non-nullable. Neither drops data on upgrade.
 
@@ -506,7 +651,7 @@ Nine Flyway migrations, applied in order:
 ./mvnw test
 ```
 
-39 tests. Integration tests run against a real PostgreSQL via Testcontainers rather than an in-memory substitute, so migrations and SQL are exercised as written.
+65 tests. Integration tests run against real PostgreSQL and Redis via Testcontainers rather than in-memory substitutes, so migrations, SQL, and TTL behaviour are exercised as written.
 
 | Suite | Covers |
 |---|---|
@@ -519,8 +664,15 @@ Nine Flyway migrations, applied in order:
 | `TenantIsolationTest` | Users invisible across tenants; same username, different people |
 | `TenantAuthorizationManagerTest` | A valid token from another tenant is refused |
 | `TokenCustomizerTenantTest` | The tenant claim follows the principal, not the request |
+| `SigningKeyRotationTest` | Rotation keeps signing working and old keys verifying |
+| `KeyCipherTest` | Round trip, per-encryption nonce, tampering, wrong master key |
+| `RevocationTest` | Deny-list behaviour against a real Redis |
+| `RevocationEndToEndTest` | Revoke through the real endpoint → 401 on the next call |
+| `ClientSecretRotationTest` | Both secrets valid during the overlap; wrong ones still refused |
 
-The last one is regression cover for a defect the rest of the suite could not have caught: the tenant claim was originally read from the current request, which is empty during `/oauth2/token` because that call comes from the client's backend rather than the user's browser. Every test passed while every token carried the wrong tenant — the tests asserted the mechanism that had been built rather than the behaviour that was wanted. It was found by driving the browser flow by hand.
+Two of these are regression cover for defects that shipped and were caught by hand. `TokenCustomizerTenantTest` is described below; `SigningKeyRotationTest` pins the case where a rotation left the encoder unable to choose a key and broke token issuance entirely — and it deliberately drives the real encoder, because the *first* version of that test asserted an assumption about how the encoder queries keys, and that assumption was wrong.
+
+The tenant test is regression cover for a defect the rest of the suite could not have caught: the tenant claim was originally read from the current request, which is empty during `/oauth2/token` because that call comes from the client's backend rather than the user's browser. Every test passed while every token carried the wrong tenant — the tests asserted the mechanism that had been built rather than the behaviour that was wanted. It was found by driving the browser flow by hand.
 
 ---
 
@@ -528,11 +680,12 @@ The last one is regression cover for a defect the rest of the suite could not ha
 
 Honest about what this is not, yet:
 
-- **Signing keys are generated in memory at startup.** Every restart invalidates previously issued tokens. Persisted keys with rotation are the next milestone.
+- **The signing-key master key sits in configuration.** Encryption at rest keeps a database dump from yielding usable keys, but the master key still lives in the deployment. A production system would hold it in a KMS or HSM.
+- **The JWKS cache is per-instance**, with a 30-second TTL and local invalidation. A rotation on one node is visible to others within the TTL. The lag is safe in the only direction it occurs — a stale node keeps signing with a key that is still published — but a multi-node deployment wanting instant propagation would need a shared invalidation signal.
 - **Clients are shared across tenants.** Deliberate — one app serving many organisations — but a deployment needing per-tenant client registration would have to replace `JdbcRegisteredClientRepository`.
-- **No tenant-scoped rate limiting**, or any rate limiting or brute-force protection on the token and login endpoints.
+- **No rate limiting or brute-force protection** on the token and login endpoints.
 - **Demo credentials are seeded on boot**, which is convenient locally and wrong anywhere else.
-- **Redis and Kafka are provisioned but unused** — they are placed for the sessions and audit-event milestones.
+- **Kafka is provisioned but unused** — it is placed for the audit-event milestone.
 
 ---
 
@@ -547,8 +700,11 @@ Honest about what this is not, yet:
 | M4 | Client credentials and API keys | ✅ |
 | M5 | RBAC and method security | ✅ |
 | M6 | Multi-tenancy | ✅ |
-| M7 | Key rotation and JWKS management | planned |
-| M8–M11 | Audit events, MFA, observability, hardening | planned |
+| M7 | Key rotation, revocation, secret rotation | ✅ |
+| M8 | Account lockout and rate limiting | planned |
+| M9 | MFA / TOTP with step-up | planned |
+| M10 | Audit events and observability | planned |
+| M11 | CI/CD, coverage gate, threat model | planned |
 
 ---
 
