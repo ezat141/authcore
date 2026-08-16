@@ -4,9 +4,28 @@ A production-shaped OAuth2 / OpenID Connect authorization server built on Spring
 
 AuthCore issues RS256-signed JWTs for three different kinds of client — a server-side web app, a browser SPA, and a machine service — and enforces what each token holder may actually do through role- and permission-based access control. Multiple isolated tenants share one server, so the same username can belong to two unrelated people. Every credential, token, and consent decision lives in PostgreSQL, so nothing is lost across a restart.
 
-This is a learning-driven portfolio project, but the security decisions are the real ones: PKCE is mandatory for public clients, refresh tokens rotate on every use, and replaying a retired refresh token revokes the entire token family per [OAuth 2.0 Security BCP §4.14](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics).
+A reference implementation, built to production security standards rather than to a deadline. PKCE is mandatory for public clients, refresh tokens rotate on every use, and replaying a retired refresh token revokes the entire token family per [OAuth 2.0 Security BCP §4.14](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics). The [Known limitations](#known-limitations) section states plainly what it does not yet do.
 
 Signing keys, client secrets, and tokens can all be rotated or revoked **while the server is running**, without invalidating anything that is still legitimately in use.
+
+AuthCore is the issuer in a three-service platform. [**GateKeeper**](https://github.com/ezat141/gatekeeper) is the reactive gateway that verifies these tokens at the edge, and [**ledger-service**](https://github.com/ezat141/ledger-service) is a downstream that re-verifies them independently rather than trusting the gateway.
+
+---
+
+## What this means if you're hiring me
+
+Most Spring Security work is configuring a library. This is the library's job, implemented from scratch.
+
+| If you need | What this repo already shows |
+|---|---|
+| SSO / OAuth2 login for your API | The full authorization code + PKCE flow, working end to end |
+| Secure token refresh | Rotation with reuse detection — a stolen token kills its whole family |
+| Multi-tenant SaaS isolation | Two tenants, same username, provably invisible to each other |
+| Zero-downtime key rotation | Rotate signing keys live; tokens signed by the old key keep working |
+| Machine-to-machine access | Client credentials and API keys, sharing one authorization rule |
+| Confidence it actually works | 65 tests against real PostgreSQL and Redis, not mocks |
+
+Clone it and run `docker compose up -d && ./mvnw spring-boot:run`. Everything above is reproducible on your machine in about two minutes, and the [walkthroughs](#walkthroughs) are copy-pasteable `curl` commands with their real responses.
 
 ---
 
