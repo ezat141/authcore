@@ -1,10 +1,16 @@
 package com.authcore.apikey;
 
+import org.springframework.http.HttpStatus;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.Map;
 
 /**
  * Lets a trusted caller ask whether an API key is valid and what it grants.
@@ -33,6 +39,10 @@ public class ApiKeyIntrospectionController {
 
     @PostMapping("/introspect")
     public ApiKeyIntrospectionResponse introspect(@RequestBody ApiKeyIntrospectionRequest request) {
+        // Unreachable over HTTP: Spring rejects a missing, empty, or literal-`null` body with
+        // HttpMessageNotReadableException before this method runs (see handleMalformedBody
+        // below), so request is never null here. This guards a direct programmatic call, e.g.
+        // introspect(null) from another bean in-process.
         if (request == null || !StringUtils.hasText(request.key())) {
             return ApiKeyIntrospectionResponse.inactive();
         }
@@ -48,5 +58,21 @@ public class ApiKeyIntrospectionController {
                     return ApiKeyIntrospectionResponse.of(apiKey);
                 })
                 .orElseGet(ApiKeyIntrospectionResponse::inactive);
+    }
+
+    /**
+     * Without this, an unparseable body's {@link HttpMessageNotReadableException} goes
+     * unhandled here, and Boot's error handling forwards the request to {@code /error} to
+     * render it. That forwarded request no longer matches this chain's {@code
+     * securityMatcher("/api/**")} in {@code AuthorizationServerConfig}, so it falls through to
+     * the second chain's {@code anyRequest().authenticated()} and comes back as a 401 with a
+     * {@code WWW-Authenticate} challenge — indistinguishable, to a caller like GateKeeper, from
+     * its own credential being refused. Handling it here resolves it within the original
+     * dispatch, before any forward can happen.
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public Map<String, String> handleMalformedBody(HttpMessageNotReadableException ex) {
+        return Map.of("error", "invalid_request", "error_description", ex.getMessage());
     }
 }
