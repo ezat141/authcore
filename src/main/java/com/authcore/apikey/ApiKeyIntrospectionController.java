@@ -14,8 +14,12 @@ import org.springframework.web.bind.annotation.RestController;
  * would put two services on one schema — the property this platform exists not to have.
  * AuthCore owns identity, and "is this credential valid" is an identity question.
  *
- * <p>Guarded by {@code SCOPE_apikeys:introspect} in {@code AuthorizationServerConfig}. Left
- * open it would be an oracle for testing stolen keys at line rate.
+ * <p>Sitting on the {@code /api/**} chain already keeps out anonymous callers, but nothing
+ * here or in {@code AuthorizationServerConfig} yet requires the specific {@code
+ * SCOPE_apikeys:introspect} scope. Until that rule is added, any authenticated caller —
+ * including a low-privilege key such as the seeded demo one — can use this endpoint as an
+ * oracle for testing whether some other key is still valid. Tracked as follow-up work, not
+ * a gap discovered later.
  */
 @RestController
 @RequestMapping("/api/internal/api-keys")
