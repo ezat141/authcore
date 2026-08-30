@@ -43,7 +43,7 @@ public class ApiKeyIntrospectionController {
                     // Keeps last_used_at tracking real validation. Note that GateKeeper
                     // caches this answer, so the column means "last validated at the
                     // source, accurate to within the gateway's cache TTL" rather than
-                    // "last used" — recorded in V7's comment and in the M3 design.
+                    // "last used" — see the M3 design, section 10.
                     apiKeyStore.touchLastUsed(apiKey.id());
                     return ApiKeyIntrospectionResponse.of(apiKey);
                 })
