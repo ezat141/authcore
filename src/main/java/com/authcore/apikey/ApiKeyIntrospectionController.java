@@ -65,12 +65,24 @@ public class ApiKeyIntrospectionController {
      * unhandled here, and Boot's error handling forwards the request to {@code /error} to
      * render it. That forwarded request no longer matches this chain's {@code
      * securityMatcher("/api/**")} in {@code AuthorizationServerConfig}, so it falls through to
-     * the second chain's {@code anyRequest().authenticated()} - which has no filter that
-     * recognizes {@code X-API-Key}, only {@code formLogin()} - and comes back as a 302
-     * redirect to the login page instead of a 400. A machine caller like GateKeeper gets an
-     * HTML login page where it expected a JSON answer, with no clean way to tell that apart
-     * from its own credential being refused. Handling it here resolves it within the original
-     * dispatch, before any forward can happen.
+     * the second chain's {@code anyRequest().authenticated()}, which has no filter that
+     * recognizes {@code X-API-Key}. What comes back there is content-negotiated on the
+     * forwarded request's {@code Accept} header, not a single fixed answer: a client
+     * accepting {@code application/json}, a bare wildcard, or nothing in particular gets a
+     * 401 with a {@code WWW-Authenticate: Bearer resource_metadata="..."} challenge -
+     * plausibly contributed by {@code OAuth2AuthorizationServerConfigurer}'s own
+     * resource-metadata support - while a client whose {@code Accept} includes any {@code
+     * text/*} type, which includes RestTemplate's computed default, gets a 302 redirect to
+     * the login page instead. Either way, a machine caller like GateKeeper gets something
+     * other than the clean 400 it should, with no reliable way to tell either wrong answer
+     * apart from its own credential being refused.
+     *
+     * <p>This only closes the gap for a body Spring itself cannot parse. Handling it here
+     * keeps that specific failure inside the original dispatch, so it never reaches the
+     * forward described above. A well-formed request can still trigger a different forward:
+     * {@code text/html} in {@code Accept} makes response-writing fail with {@code
+     * HttpMediaTypeNotAcceptableException}, since this endpoint has no converter for that
+     * type, and that is a separate, pre-existing gap this handler does not address.
      */
     @ExceptionHandler(HttpMessageNotReadableException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
