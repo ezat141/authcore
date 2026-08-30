@@ -1,5 +1,6 @@
 package com.authcore;
 
+import com.authcore.apikey.ApiKey;
 import com.authcore.apikey.ApiKeyIntrospectionController;
 import com.authcore.apikey.ApiKeyIntrospectionRequest;
 import com.authcore.apikey.ApiKeyIntrospectionResponse;
@@ -9,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -20,8 +22,8 @@ import static org.mockito.Mockito.when;
 
 class ApiKeyIntrospectionControllerTest {
 
-    ApiKeyStore store;
-    ApiKeyIntrospectionController controller;
+    private ApiKeyStore store;
+    private ApiKeyIntrospectionController controller;
 
     @BeforeEach
     void setUp() {
@@ -32,8 +34,8 @@ class ApiKeyIntrospectionControllerTest {
     @Test
     void reportsAUsableKeyAsActiveWithItsScopes() {
         Instant expiry = Instant.now().plus(Duration.ofDays(30));
-        when(store.findByRawKey("ak_good")).thenReturn(java.util.Optional.of(
-                new com.authcore.apikey.ApiKey("id-1", "reporting", "ak_good", Set.of("payments:read"), true, expiry)));
+        when(store.findByRawKey("ak_good"))
+                .thenReturn(Optional.of(key("id-1", "reporting", "ak_good", true, expiry)));
 
         ApiKeyIntrospectionResponse response =
                 controller.introspect(new ApiKeyIntrospectionRequest("ak_good"));
@@ -46,7 +48,7 @@ class ApiKeyIntrospectionControllerTest {
 
     @Test
     void reportsAnUnknownKeyAsInactiveAndSaysNothingElse() {
-        when(store.findByRawKey(anyString())).thenReturn(java.util.Optional.empty());
+        when(store.findByRawKey(anyString())).thenReturn(Optional.empty());
 
         ApiKeyIntrospectionResponse response =
                 controller.introspect(new ApiKeyIntrospectionRequest("ak_nope"));
@@ -62,8 +64,8 @@ class ApiKeyIntrospectionControllerTest {
      */
     @Test
     void reportsADisabledKeyIdenticallyToAnUnknownOne() {
-        when(store.findByRawKey("ak_disabled")).thenReturn(java.util.Optional.of(
-                new com.authcore.apikey.ApiKey("id-2", "old", "ak_disabled", Set.of("payments:read"), false, null)));
+        when(store.findByRawKey("ak_disabled"))
+                .thenReturn(Optional.of(key("id-2", "old", "ak_disabled", false, null)));
 
         assertThat(controller.introspect(new ApiKeyIntrospectionRequest("ak_disabled")))
                 .isEqualTo(ApiKeyIntrospectionResponse.inactive());
@@ -71,8 +73,8 @@ class ApiKeyIntrospectionControllerTest {
 
     @Test
     void reportsAnExpiredKeyIdenticallyToAnUnknownOne() {
-        when(store.findByRawKey("ak_expired")).thenReturn(java.util.Optional.of(
-                new com.authcore.apikey.ApiKey("id-3", "lapsed", "ak_expired", Set.of("payments:read"),
+        when(store.findByRawKey("ak_expired"))
+                .thenReturn(Optional.of(key("id-3", "lapsed", "ak_expired",
                         true, Instant.now().minus(Duration.ofDays(1)))));
 
         assertThat(controller.introspect(new ApiKeyIntrospectionRequest("ak_expired")))
@@ -81,7 +83,7 @@ class ApiKeyIntrospectionControllerTest {
 
     @Test
     void doesNotTouchLastUsedForAKeyItRefuses() {
-        when(store.findByRawKey(anyString())).thenReturn(java.util.Optional.empty());
+        when(store.findByRawKey(anyString())).thenReturn(Optional.empty());
 
         controller.introspect(new ApiKeyIntrospectionRequest("ak_nope"));
 
@@ -93,5 +95,9 @@ class ApiKeyIntrospectionControllerTest {
         assertThat(controller.introspect(new ApiKeyIntrospectionRequest("  ")))
                 .isEqualTo(ApiKeyIntrospectionResponse.inactive());
         verify(store, never()).findByRawKey(anyString());
+    }
+
+    private ApiKey key(String id, String name, String keyPrefix, boolean enabled, Instant expiresAt) {
+        return new ApiKey(id, name, keyPrefix, Set.of("payments:read"), enabled, expiresAt);
     }
 }
