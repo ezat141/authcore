@@ -1,0 +1,48 @@
+package com.authcore.apikey;
+
+import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+/**
+ * Lets a trusted caller ask whether an API key is valid and what it grants.
+ *
+ * <p>Exists because the platform's other services cannot answer that question. The
+ * {@code api_keys} table is AuthCore's, and a second service reaching into it directly
+ * would put two services on one schema — the property this platform exists not to have.
+ * AuthCore owns identity, and "is this credential valid" is an identity question.
+ *
+ * <p>Guarded by {@code SCOPE_apikeys:introspect} in {@code AuthorizationServerConfig}. Left
+ * open it would be an oracle for testing stolen keys at line rate.
+ */
+@RestController
+@RequestMapping("/api/internal/api-keys")
+public class ApiKeyIntrospectionController {
+
+    private final ApiKeyStore apiKeyStore;
+
+    public ApiKeyIntrospectionController(ApiKeyStore apiKeyStore) {
+        this.apiKeyStore = apiKeyStore;
+    }
+
+    @PostMapping("/introspect")
+    public ApiKeyIntrospectionResponse introspect(@RequestBody ApiKeyIntrospectionRequest request) {
+        if (request == null || !StringUtils.hasText(request.key())) {
+            return ApiKeyIntrospectionResponse.inactive();
+        }
+
+        return apiKeyStore.findByRawKey(request.key())
+                .filter(ApiKey::isUsable)
+                .map(apiKey -> {
+                    // Keeps last_used_at tracking real validation. Note that GateKeeper
+                    // caches this answer, so the column means "last validated at the
+                    // source, accurate to within the gateway's cache TTL" rather than
+                    // "last used" — recorded in V7's comment and in the M3 design.
+                    apiKeyStore.touchLastUsed(apiKey.id());
+                    return ApiKeyIntrospectionResponse.of(apiKey);
+                })
+                .orElseGet(ApiKeyIntrospectionResponse::inactive);
+    }
+}
