@@ -18,17 +18,17 @@ import static org.assertj.core.api.Assertions.catchThrowableOfType;
  * A body {@code ApiKeyIntrospectionController} cannot parse must come back as a 400, even
  * though the caller authenticated fine.
  *
- * <p>This only reproduces against a real server: {@code HttpMessageNotReadableException}
- * would normally be resolved into a 400 within the original request, but unless the
- * controller handles it locally, the embedded container's error-page mechanism forwards the
- * request to {@code /error} before the response is sent. That forwarded request no longer
- * matches chain 1's {@code securityMatcher("/api/**")} in {@code AuthorizationServerConfig},
- * so it falls through to chain 2's {@code anyRequest().authenticated()} and comes back as a
- * 401 with a {@code WWW-Authenticate: Bearer} challenge instead - indistinguishable, to a
- * caller like GateKeeper, from its own credential being refused. A mock-environment
- * {@code MockMvc} test does not exercise this: without a real container there is no error
- * page forward to mis-route, so {@link org.springframework.boot.test.web.server.LocalServerPort}
- * plus a real HTTP client, as in {@link MachineAccessIntegrationTest}, is required.
+ * <p>This only reproduces against a real server. Unhandled, the controller's {@code
+ * HttpMessageNotReadableException} makes the embedded container's error-page mechanism
+ * forward the request to {@code /error} before the response is sent. That forwarded request
+ * no longer matches chain 1's {@code securityMatcher("/api/**")} in {@code
+ * AuthorizationServerConfig}, so it falls through to chain 2, which has no filter that
+ * recognizes {@code X-API-Key} - only {@code formLogin()} - and comes back a 302 redirect to
+ * the login page instead. A machine caller like GateKeeper gets an HTML login page where it
+ * expected a JSON answer, with no clean way to tell that apart from its own credential being
+ * refused. A mock-environment {@code MockMvc} test does not exercise this: without a real
+ * container there is no error page forward to mis-route, so {@link LocalServerPort} plus a
+ * real HTTP client, as in {@link MachineAccessIntegrationTest}, is required.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Import(TestcontainersConfiguration.class)
@@ -73,7 +73,8 @@ class ApiKeyIntrospectionMalformedBodyTest {
                         new HttpEntity<>(rawBody, headers), String.class),
                 HttpClientErrorException.BadRequest.class);
 
-        assertThat(ex).as("expected a 400, not a 401 misreported as an auth failure").isNotNull();
+        assertThat(ex).as("expected a clean 400, not a redirect to the login page").isNotNull();
+        assertThat(ex.getResponseHeaders().getLocation()).isNull();
         assertThat(ex.getResponseHeaders().get("WWW-Authenticate")).isNull();
     }
 }
