@@ -23,8 +23,8 @@ import static org.assertj.core.api.Assertions.catchThrowableOfType;
  * forward the request to {@code /error} before the response is sent. That forwarded request
  * no longer matches chain 1's {@code securityMatcher("/api/**")} in {@code
  * AuthorizationServerConfig}, so it falls through to chain 2, which has no filter that
- * recognizes {@code X-API-Key} - only {@code formLogin()} - and comes back a 302 redirect to
- * the login page instead. A machine caller like GateKeeper gets an HTML login page where it
+ * recognizes {@code X-API-Key} - only {@code formLogin()} - and comes back as a 302 redirect
+ * to the login page instead. A machine caller like GateKeeper gets an HTML login page where it
  * expected a JSON answer, with no clean way to tell that apart from its own credential being
  * refused. A mock-environment {@code MockMvc} test does not exercise this: without a real
  * container there is no error page forward to mis-route, so {@link LocalServerPort} plus a

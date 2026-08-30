@@ -66,11 +66,11 @@ public class ApiKeyIntrospectionController {
      * render it. That forwarded request no longer matches this chain's {@code
      * securityMatcher("/api/**")} in {@code AuthorizationServerConfig}, so it falls through to
      * the second chain's {@code anyRequest().authenticated()} - which has no filter that
-     * recognizes {@code X-API-Key}, only {@code formLogin()} - and comes back a 302 redirect
-     * to the login page instead of a 400. A machine caller like GateKeeper gets an HTML login
-     * page where it expected a JSON answer, with no clean way to tell that apart from its own
-     * credential being refused. Handling it here resolves it within the original dispatch,
-     * before any forward can happen.
+     * recognizes {@code X-API-Key}, only {@code formLogin()} - and comes back as a 302
+     * redirect to the login page instead of a 400. A machine caller like GateKeeper gets an
+     * HTML login page where it expected a JSON answer, with no clean way to tell that apart
+     * from its own credential being refused. Handling it here resolves it within the original
+     * dispatch, before any forward can happen.
      */
     @ExceptionHandler(HttpMessageNotReadableException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
