@@ -69,6 +69,9 @@ class ApiKeyIntrospectionControllerTest {
 
         assertThat(controller.introspect(new ApiKeyIntrospectionRequest("ak_disabled")))
                 .isEqualTo(ApiKeyIntrospectionResponse.inactive());
+        // A disabled key must not look "just validated" - that would misreport it as usable
+        // the moment someone reads last_used_at, not just misreport it in this response.
+        verify(store, never()).touchLastUsed(anyString());
     }
 
     @Test
@@ -79,6 +82,7 @@ class ApiKeyIntrospectionControllerTest {
 
         assertThat(controller.introspect(new ApiKeyIntrospectionRequest("ak_expired")))
                 .isEqualTo(ApiKeyIntrospectionResponse.inactive());
+        verify(store, never()).touchLastUsed(anyString());
     }
 
     @Test
