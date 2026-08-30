@@ -12,9 +12,10 @@ import java.util.Set;
  * <p>Unknown, disabled and expired keys all produce the same {@code active: false} with no
  * further detail. Distinguishing them would make this endpoint an enumeration oracle: a
  * caller able to tell "no such key" from "that key exists but is disabled" could confirm
- * which keys are real. AuthCore still logs the distinction — see
- * {@link ApiKeyAuthenticationProvider}, which keeps its DisabledException /
- * CredentialsExpiredException split — so operators keep the diagnosis the caller is denied.
+ * which keys are real. AuthCore still surfaces the distinction internally, as two different
+ * exception types — see {@link ApiKeyAuthenticationProvider}, which keeps its
+ * DisabledException / CredentialsExpiredException split — so the diagnosis the caller is
+ * denied is not lost.
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public record ApiKeyIntrospectionResponse(
@@ -27,6 +28,7 @@ public record ApiKeyIntrospectionResponse(
         return new ApiKeyIntrospectionResponse(false, null, null, null);
     }
 
+    /** Caller must have already confirmed {@link ApiKey#isUsable()}. */
     public static ApiKeyIntrospectionResponse of(ApiKey apiKey) {
         return new ApiKeyIntrospectionResponse(
                 true, apiKey.name(), apiKey.scopes(), apiKey.expiresAt());
