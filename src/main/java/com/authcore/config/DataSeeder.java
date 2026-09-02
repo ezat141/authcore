@@ -37,6 +37,9 @@ public class DataSeeder implements ApplicationRunner {
     static final String DEMO_API_KEY_NAME = "demo-reporting-job";
     static final String DEMO_API_KEY = "ak_demo_reporting_job_local_only_0000000000";
 
+    static final String GATEWAY_API_KEY_NAME = "gatekeeper-introspection";
+    static final String GATEWAY_API_KEY = "ak_gatekeeper_introspection_local_only_00000";
+
     private final UserRepository userRepository;
     private final RoleRepository roleRepository;
     private final PermissionRepository permissionRepository;
@@ -82,6 +85,7 @@ public class DataSeeder implements ApplicationRunner {
         upsert(publicSpaClient());
         upsert(machineClient());
         seedApiKey();
+        seedGatewayApiKey();
     }
 
     private Tenant requireTenant(String slug) {
@@ -167,6 +171,9 @@ public class DataSeeder implements ApplicationRunner {
      * creation — this seeded one exists only for local demos.
      */
     private void seedApiKey() {
+        // Name-only guard, same as seedGatewayApiKey(): this row is never revisited once
+        // seeded, so the 365-day expiry below is fixed at first boot. The key lapses for
+        // good about a year later, with nothing to explain why — pre-existing, not fixed here.
         if (apiKeyStore.existsByName(DEMO_API_KEY_NAME)) return;
 
         apiKeyStore.save(
@@ -229,6 +236,29 @@ public class DataSeeder implements ApplicationRunner {
                 .accessTokenTimeToLive(Duration.ofMinutes(5))
                 .refreshTokenTimeToLive(Duration.ofDays(7))
                 .build();
+    }
+
+    /**
+     * The credential GateKeeper presents when asking about somebody else's key.
+     *
+     * <p>Scoped to apikeys:introspect and nothing else — never payments:*. A leak of this key
+     * yields an introspection oracle rather than data access, which is the difference between
+     * an incident and a breach.
+     *
+     * <p>No expiry, deliberately: an infrastructure credential that silently lapses takes the
+     * gateway's API-key authentication down with it. That makes it a long-lived secret with no
+     * online rotation path, which is accepted debt recorded in the M3 design — the
+     * overlap-window pattern in ClientSecretRotationStore is the thing to copy when M9 brings
+     * key management under an API.
+     */
+    private void seedGatewayApiKey() {
+        // Name-only guard: once this row exists, editing GATEWAY_API_KEY here has no effect
+        // on it. Rotating the value means changing GATEWAY_API_KEY_NAME too, or clearing the row.
+        if (apiKeyStore.existsByName(GATEWAY_API_KEY_NAME)) return;
+
+        apiKeyStore.save(GATEWAY_API_KEY_NAME, GATEWAY_API_KEY, Set.of("apikeys:introspect"), null);
+
+        log.warn("Seeded gateway introspection key '{}'. Local development only.", GATEWAY_API_KEY_NAME);
     }
 
     /** Re-seeds on every boot so settings changes take effect without a manual DB wipe. */
