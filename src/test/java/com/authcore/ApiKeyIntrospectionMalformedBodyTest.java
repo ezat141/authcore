@@ -16,7 +16,7 @@ import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 /**
  * A body {@code ApiKeyIntrospectionController} cannot parse must come back as a 400, even
- * though the caller authenticated fine.
+ * though the caller is authenticated and holds the scope this endpoint requires.
  *
  * <p>This only reproduces against a real server. Unhandled, the controller's {@code
  * HttpMessageNotReadableException} makes the embedded container's error-page mechanism

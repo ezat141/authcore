@@ -58,10 +58,33 @@ class ApiKeyIntrospectionAccessTest {
      */
     @Test
     void refusesAnAuthenticatedCallerLackingTheScope() {
-        // The demo key holds payments:read only, not apikeys:introspect.
+        // The real threat model: a low-privilege key (demo, payments:read only) probing
+        // whether a far more sensitive one (the gateway's own credential) is still good.
         assertThatThrownBy(() -> http.exchange(
                 url("/api/internal/api-keys/introspect"), HttpMethod.POST,
-                introspectionRequest(DEMO_API_KEY, DEMO_API_KEY), Map.class))
+                introspectionRequest(DEMO_API_KEY, GATEWAY_API_KEY), Map.class))
+                .isInstanceOf(HttpClientErrorException.Forbidden.class);
+    }
+
+    /**
+     * Guards against the scope check moving somewhere that runs after argument resolution —
+     * a {@code @PreAuthorize} on {@code introspect} instead of the filter-chain rule, for
+     * instance. {@code @RequestBody} parsing happens while Spring MVC resolves the handler
+     * method's arguments, which is before a method-security interceptor around the method
+     * body ever gets a chance to run. A 400 here would mean the malformed body was parsed
+     * before authorization was checked at all: parser feedback handed to, and deserialization
+     * work spent on, a caller never entitled to a response in the first place.
+     */
+    @Test
+    void refusesTheCallerLackingTheScopeBeforeParsingTheBody() {
+        // A 400 here would mean the body was parsed before authorization ran.
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("X-API-Key", DEMO_API_KEY);
+        headers.setContentType(MediaType.APPLICATION_JSON);
+
+        assertThatThrownBy(() -> http.exchange(
+                url("/api/internal/api-keys/introspect"), HttpMethod.POST,
+                new HttpEntity<>("{ not valid json", headers), String.class))
                 .isInstanceOf(HttpClientErrorException.Forbidden.class);
     }
 
@@ -74,6 +97,7 @@ class ApiKeyIntrospectionAccessTest {
 
         assertThat(response.getStatusCode().value()).isEqualTo(200);
         assertThat(response.getBody().get("active")).isEqualTo(true);
+        assertThat(response.getBody().get("name")).isEqualTo("demo-reporting-job");
         assertThat((List<String>) response.getBody().get("scopes")).containsExactly("payments:read");
     }
 
