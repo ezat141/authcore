@@ -43,9 +43,11 @@ import static org.assertj.core.api.Assertions.catchThrowableOfType;
 @Import(TestcontainersConfiguration.class)
 class ApiKeyIntrospectionMalformedBodyTest {
 
-    // DataSeeder.DEMO_API_KEY is package-private to com.authcore.config; redeclared here the
-    // same way MachineAccessIntegrationTest does.
-    private static final String DEMO_API_KEY = "ak_demo_reporting_job_local_only_0000000000";
+    // DataSeeder.GATEWAY_API_KEY is package-private to com.authcore.config; redeclared here
+    // the same way MachineAccessIntegrationTest does. Must be a key actually scoped for this
+    // endpoint (SCOPE_apikeys:introspect, guarded since Task 3) - the demo key no longer
+    // clears authorization, so it would never reach the malformed-body handling under test.
+    private static final String GATEWAY_API_KEY = "ak_gatekeeper_introspection_local_only_00000";
 
     @LocalServerPort
     private int port;
@@ -73,7 +75,7 @@ class ApiKeyIntrospectionMalformedBodyTest {
 
     private void assertBadRequestNotAuthFailure(String rawBody) {
         HttpHeaders headers = new HttpHeaders();
-        headers.set("X-API-Key", DEMO_API_KEY);
+        headers.set("X-API-Key", GATEWAY_API_KEY);
         headers.setContentType(MediaType.APPLICATION_JSON);
 
         HttpClientErrorException.BadRequest ex = catchThrowableOfType(

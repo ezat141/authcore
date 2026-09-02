@@ -94,6 +94,8 @@ public class AuthorizationServerConfig {
         http
             .securityMatcher("/api/**")
             .authorizeHttpRequests(authorize -> authorize
+                .requestMatchers("/api/internal/**")
+                    .access(tenantScoped(AuthorityAuthorizationManager.hasAuthority("SCOPE_apikeys:introspect")))
                 .requestMatchers(HttpMethod.GET, "/api/machine/**")
                     .access(tenantScoped(AuthorityAuthorizationManager.hasAuthority("SCOPE_payments:read")))
                 .requestMatchers(HttpMethod.POST, "/api/machine/**")
