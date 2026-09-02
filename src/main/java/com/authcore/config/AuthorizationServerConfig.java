@@ -94,6 +94,11 @@ public class AuthorizationServerConfig {
         http
             .securityMatcher("/api/**")
             .authorizeHttpRequests(authorize -> authorize
+                // Namespace-wide on purpose: anything new under /api/internal is locked to the
+                // gateway's key by default rather than falling through to authenticated() below.
+                // An internal endpoint needing a different scope must add its own rule above this one.
+                .requestMatchers("/api/internal/**")
+                    .access(tenantScoped(AuthorityAuthorizationManager.hasAuthority("SCOPE_apikeys:introspect")))
                 .requestMatchers(HttpMethod.GET, "/api/machine/**")
                     .access(tenantScoped(AuthorityAuthorizationManager.hasAuthority("SCOPE_payments:read")))
                 .requestMatchers(HttpMethod.POST, "/api/machine/**")
