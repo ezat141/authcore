@@ -171,6 +171,9 @@ public class DataSeeder implements ApplicationRunner {
      * creation — this seeded one exists only for local demos.
      */
     private void seedApiKey() {
+        // Name-only guard, same as seedGatewayApiKey(): this row is never revisited once
+        // seeded, so the 365-day expiry below is fixed at first boot. The key lapses for
+        // good about a year later, with nothing to explain why — pre-existing, not fixed here.
         if (apiKeyStore.existsByName(DEMO_API_KEY_NAME)) return;
 
         apiKeyStore.save(
@@ -249,6 +252,8 @@ public class DataSeeder implements ApplicationRunner {
      * key management under an API.
      */
     private void seedGatewayApiKey() {
+        // Name-only guard: once this row exists, editing GATEWAY_API_KEY here has no effect
+        // on it. Rotating the value means changing GATEWAY_API_KEY_NAME too, or clearing the row.
         if (apiKeyStore.existsByName(GATEWAY_API_KEY_NAME)) return;
 
         apiKeyStore.save(GATEWAY_API_KEY_NAME, GATEWAY_API_KEY, Set.of("apikeys:introspect"), null);
