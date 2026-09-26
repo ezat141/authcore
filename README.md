@@ -23,7 +23,7 @@ Most Spring Security work is configuring a library. This is the library's job, i
 | Multi-tenant SaaS isolation | Two tenants, same username, provably invisible to each other |
 | Zero-downtime key rotation | Rotate signing keys live; tokens signed by the old key keep working |
 | Machine-to-machine access | Client credentials and API keys, sharing one authorization rule |
-| Confidence it actually works | 65 tests against real PostgreSQL and Redis, not mocks |
+| Confidence it actually works | 78 tests against real PostgreSQL and Redis, not mocks |
 
 Clone it and run `docker compose up -d && ./mvnw spring-boot:run`. Everything above is reproducible on your machine in about two minutes, and the [walkthroughs](#walkthroughs) are copy-pasteable `curl` commands with their real responses.
 
@@ -670,7 +670,7 @@ Eleven Flyway migrations, applied in order:
 ./mvnw test
 ```
 
-65 tests. Integration tests run against real PostgreSQL and Redis via Testcontainers rather than in-memory substitutes, so migrations, SQL, and TTL behaviour are exercised as written.
+78 tests. Integration tests run against real PostgreSQL and Redis via Testcontainers rather than in-memory substitutes, so migrations, SQL, and TTL behaviour are exercised as written.
 
 | Suite | Covers |
 |---|---|
@@ -688,6 +688,9 @@ Eleven Flyway migrations, applied in order:
 | `RevocationTest` | Deny-list behaviour against a real Redis |
 | `RevocationEndToEndTest` | Revoke through the real endpoint → 401 on the next call |
 | `ClientSecretRotationTest` | Both secrets valid during the overlap; wrong ones still refused |
+| `ApiKeyIntrospectionAccessTest` | Introspection refuses an unauthenticated caller and one lacking the scope — before reading the body |
+| `ApiKeyIntrospectionControllerTest` | A usable key reports its scopes; unknown, disabled and expired keys all answer identically |
+| `ApiKeyIntrospectionMalformedBodyTest` | Malformed, empty and `null` bodies are a 400, not an authentication failure |
 
 Two of these are regression cover for defects that shipped and were caught by hand. `TokenCustomizerTenantTest` is described below; `SigningKeyRotationTest` pins the case where a rotation left the encoder unable to choose a key and broke token issuance entirely — and it deliberately drives the real encoder, because the *first* version of that test asserted an assumption about how the encoder queries keys, and that assumption was wrong.
 
