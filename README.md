@@ -530,6 +530,8 @@ The third is the worst of them. Stock `/oauth2/revoke` marks the stored authoriz
 
 A deliberate consequence: the deny-list is keyed by `jti` and each entry's TTL is the token's own remaining lifetime. A revoked token stops being interesting once it would have expired anyway, so the list is self-limiting, and it holds no credentials — leaking it reveals which tokens were revoked, not how to use any.
 
+The entry's shape is a cross-service contract, not an internal detail: each revoked token is the key `authcore:revoked:jti:<jti>` with the value `revoked`. A resource server that checks revocation reads that key directly, so renaming it would silently stop revocation working anywhere but here.
+
 ### One ACTIVE signing key, enforced by the database
 
 ```sql
